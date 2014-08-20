@@ -129,7 +129,7 @@ static struct gpiomux_setting synaptics_int_act_cfg = {
 static struct gpiomux_setting synaptics_int_sus_cfg = {
 	.func = GPIOMUX_FUNC_GPIO,
 	.drv = GPIOMUX_DRV_2MA,
-	.pull = GPIOMUX_PULL_DOWN,
+	.pull = GPIOMUX_PULL_NONE,
 };
 
 static struct gpiomux_setting taiko_int = {
@@ -140,14 +140,14 @@ static struct gpiomux_setting taiko_int = {
 
 static struct msm_gpiomux_config msm_touch_configs[] __initdata = {
 	{
-		.gpio      = 80,		/* TOUCH RESET */
+		.gpio      = 57,		/* TOUCH RESET */
 		.settings = {
 			[GPIOMUX_ACTIVE] = &synaptics_reset_act_cfg,
 			[GPIOMUX_SUSPENDED] = &synaptics_reset_sus_cfg,
 		},
 	},
 	{
-		.gpio      = 81,		/* TOUCH IRQ */
+		.gpio      = 62,		/* TOUCH IRQ */
 		.settings = {
 			[GPIOMUX_ACTIVE] = &synaptics_int_act_cfg,
 			[GPIOMUX_SUSPENDED] = &synaptics_int_sus_cfg,
@@ -189,7 +189,7 @@ static struct gpiomux_setting gpio_fps_spi_sleep = {
 static struct gpiomux_setting gpio_fps_spi_drdy = {
 	.func = GPIOMUX_FUNC_GPIO,
 	.drv = GPIOMUX_DRV_2MA,
-	.pull = GPIOMUX_PULL_UP,
+	.pull = GPIOMUX_PULL_DOWN,
 };
 
 static struct msm_gpiomux_config msm_blsp12_fps_spi_configs[] __initdata = {
@@ -288,6 +288,47 @@ static struct msm_gpiomux_config stm401_configs[] __initdata = {
 		.settings = {
 			[GPIOMUX_ACTIVE]    = &stm401_reset_gpio_cfg,
 			[GPIOMUX_SUSPENDED] = &stm401_reset_gpio_cfg,
+		},
+	},
+};
+
+static struct gpiomux_setting bcm2079x_active_gpio_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_DOWN,
+	.dir = GPIOMUX_OUT_LOW,
+};
+
+static struct gpiomux_setting bcm2079x_suspended_gpio_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_DOWN,
+	.dir = GPIOMUX_OUT_LOW,
+};
+
+static struct gpiomux_setting bcm2079x_irq_gpio_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_DOWN,
+	.dir = GPIOMUX_IN,
+};
+
+static struct msm_gpiomux_config bcm2079x_configs[] __initdata = {
+	{
+		.gpio = 31, /* NFC_WAKE */
+		.settings = {
+			[GPIOMUX_ACTIVE]    = &bcm2079x_active_gpio_cfg,
+			[GPIOMUX_SUSPENDED] = &bcm2079x_suspended_gpio_cfg,
+		},
+		.gpio = 32, /* REG_PU*/
+		.settings = {
+			[GPIOMUX_ACTIVE]    = &bcm2079x_active_gpio_cfg,
+			[GPIOMUX_SUSPENDED] = &bcm2079x_suspended_gpio_cfg,
+		},
+		.gpio = 34, /* NFC_IRQ*/
+		.settings = {
+			[GPIOMUX_ACTIVE]    = &bcm2079x_irq_gpio_cfg,
+			[GPIOMUX_SUSPENDED] = &bcm2079x_irq_gpio_cfg,
 		},
 	},
 };
@@ -517,13 +558,19 @@ static struct gpiomux_setting cam_settings[] = {
 		.drv = GPIOMUX_DRV_2MA,
 		.pull = GPIOMUX_PULL_DOWN,
 	},
+
+	{
+		.func = GPIOMUX_FUNC_1, /*active 2*/ /* 5 */
+		.drv = GPIOMUX_DRV_6MA,
+		.pull = GPIOMUX_PULL_NONE,
+	},
 };
 
 static struct msm_gpiomux_config msm_sensor_configs[] __initdata = {
 	{
 		.gpio = 15, /* CAM_MCLK0 */
 		.settings = {
-			[GPIOMUX_ACTIVE]    = &cam_settings[0],
+			[GPIOMUX_ACTIVE]    = &cam_settings[5],
 			[GPIOMUX_SUSPENDED] = &cam_settings[1],
 		},
 	},
@@ -537,7 +584,7 @@ static struct msm_gpiomux_config msm_sensor_configs[] __initdata = {
 	{
 		.gpio = 17, /* CAM_MCLK2 */
 		.settings = {
-			[GPIOMUX_ACTIVE]    = &cam_settings[0],
+			[GPIOMUX_ACTIVE]    = &cam_settings[5],
 			[GPIOMUX_SUSPENDED] = &cam_settings[1],
 		},
 	},
@@ -655,6 +702,50 @@ static struct msm_gpiomux_config c55_i2s_configs[] __initdata = {
 		.settings = {
 			[GPIOMUX_SUSPENDED] = &c55_i2s_sus_cfg,
 			[GPIOMUX_ACTIVE] = &c55_i2s_act_cfg,
+		},
+	},
+};
+
+static struct gpiomux_setting auxpcm_act_cfg = {
+	.func = GPIOMUX_FUNC_1,
+	.drv = GPIOMUX_DRV_8MA,
+	.pull = GPIOMUX_PULL_NONE,
+};
+
+
+static struct gpiomux_setting auxpcm_sus_cfg = {
+	.func = GPIOMUX_FUNC_1,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_DOWN,
+};
+
+static struct msm_gpiomux_config msm8974_quat_auxpcm_configs[] __initdata = {
+	{
+		.gpio = 58,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &auxpcm_sus_cfg,
+			[GPIOMUX_ACTIVE] = &auxpcm_act_cfg,
+		},
+	},
+	{
+		.gpio = 59,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &auxpcm_sus_cfg,
+			[GPIOMUX_ACTIVE] = &auxpcm_act_cfg,
+		},
+	},
+	{
+		.gpio = 60,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &auxpcm_sus_cfg,
+			[GPIOMUX_ACTIVE] = &auxpcm_act_cfg,
+		},
+	},
+	{
+		.gpio = 61,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &auxpcm_sus_cfg,
+			[GPIOMUX_ACTIVE] = &auxpcm_act_cfg,
 		},
 	},
 };
@@ -916,6 +1007,13 @@ static struct msm_gpiomux_config vib_en_gpio __initdata = {
 	},
 };
 
+static struct gpiomux_setting cycapsense_reset = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_NONE,
+	.dir = GPIOMUX_OUT_LOW,
+};
+
 static struct msm_gpiomux_config cycapsence_issp_gpio_configs[] = {
 	/*
 	 * pull down are enabled by default on following pins, they should be
@@ -933,6 +1031,13 @@ static struct msm_gpiomux_config cycapsence_issp_gpio_configs[] = {
 		.settings = {
 			[GPIOMUX_ACTIVE]    = &gpio_suspend_config[0],
 			[GPIOMUX_SUSPENDED] = &gpio_suspend_config[0],
+		},
+	},
+	{
+		.gpio = 63, /*XRES*/
+		.settings = {
+			[GPIOMUX_ACTIVE]    = &cycapsense_reset,
+			[GPIOMUX_SUSPENDED] = &cycapsense_reset,
 		},
 	},
 };
@@ -954,13 +1059,13 @@ static struct gpiomux_setting c55_ap_int_cfg = {
 
 static struct msm_gpiomux_config c55_configs[] __initdata = {
 	{
-		.gpio = 61,
+		.gpio = 124,
 		.settings = {
 			[GPIOMUX_SUSPENDED] = &c55_c55_int_cfg,
 		},
 	},
 	{
-		.gpio = 102,
+		.gpio = 79,
 		.settings = {
 			[GPIOMUX_SUSPENDED] = &c55_ap_int_cfg,
 		},
@@ -1002,6 +1107,23 @@ static struct msm_gpiomux_config wm5110_spi_configs[] __initdata = {
 #endif
 };
 
+static struct gpiomux_setting tmp108_irq_gpio_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_UP,
+	.dir = GPIOMUX_IN,
+};
+
+static struct msm_gpiomux_config tmp108_configs[] __initdata = {
+	{
+		.gpio = 144,
+		.settings = {
+			[GPIOMUX_ACTIVE]    = &tmp108_irq_gpio_cfg,
+			[GPIOMUX_SUSPENDED] = &tmp108_irq_gpio_cfg,
+		},
+	}
+};
+
 void __init msm_8974_moto_init_gpiomux(void)
 {
 	int rc;
@@ -1037,11 +1159,18 @@ void __init msm_8974_moto_init_gpiomux(void)
 
 	msm_gpiomux_install(stm401_configs, ARRAY_SIZE(stm401_configs));
 
+	msm_gpiomux_install(bcm2079x_configs, ARRAY_SIZE(bcm2079x_configs));
+
+	msm_gpiomux_install(tmp108_configs, ARRAY_SIZE(tmp108_configs));
+
 	if (of_board_is_fluid())
 		msm_gpiomux_install(msm_mhl_configs,
 				    ARRAY_SIZE(msm_mhl_configs));
 
 	msm_gpiomux_install(c55_i2s_configs, ARRAY_SIZE(c55_i2s_configs));
+
+	msm_gpiomux_install(msm8974_quat_auxpcm_configs,
+		ARRAY_SIZE(msm8974_quat_auxpcm_configs));
 
 	msm_gpiomux_install(msm_lcd_configs,
 			ARRAY_SIZE(msm_lcd_configs));

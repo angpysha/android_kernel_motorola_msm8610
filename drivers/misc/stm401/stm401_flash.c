@@ -18,7 +18,6 @@
 
 #include <linux/cdev.h>
 #include <linux/delay.h>
-#include <linux/earlysuspend.h>
 #include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/export.h>
@@ -51,8 +50,9 @@
 #define BUSY_BYTE 0x76
 
 #define ERASE_DELAY 200
-#define ERASE_TIMEOUT 50
+#define ERASE_TIMEOUT 80
 
+#define RESTART_DELAY 1000
 #define WRITE_DELAY 20
 #define WRITE_TIMEOUT 20
 
@@ -65,6 +65,7 @@ enum stm_command {
 	NO_WAIT_WRITE_MEMORY = 0x32,
 	ERASE = 0x44,
 	NO_WAIT_ERASE = 0x45,
+	WRITE_UNPROTECT = 0x73,
 };
 
 
@@ -276,7 +277,7 @@ int stm401_boot_flash_erase(void)
 		   driver will time out and fail.
 		   Instead we just wait and hope the erase was succesful.
 		*/
-		msleep(10000);
+		msleep(16000);
 	}
 
 	dev_dbg(&stm401_misc_data->client->dev,
@@ -292,7 +293,7 @@ int stm401_get_version(struct stm401_data *ps_stm401)
 		dev_dbg(&ps_stm401->client->dev,
 			"Switch to normal to get version\n");
 		switch_stm401_mode(NORMALMODE);
-		msleep_interruptible(stm401_i2c_retry_delay);
+		msleep(stm401_i2c_retry_delay);
 	}
 	dev_dbg(&ps_stm401->client->dev, "STM software version: ");
 	stm401_cmdbuff[0] = REV_ID;
@@ -449,7 +450,7 @@ ssize_t stm401_misc_write(struct file *file, const char __user *buff,
 				goto EXIT;
 			if (stm401_readbuff[0] != ACK_BYTE) {
 				dev_err(&stm401_misc_data->client->dev,
-					"Error sending memory address 0x%02x\n",
+					"Error sending write memory address 0x%02x\n",
 					stm401_readbuff[0]);
 				err = -EIO;
 				goto EXIT;
@@ -491,8 +492,6 @@ ssize_t stm401_misc_write(struct file *file, const char __user *buff,
 				err = -EIO;
 				goto EXIT;
 			}
-
-			stm401_misc_data->current_addr += count;
 		} else {
 			/* Use old bootloader write command */
 			err = stm401_boot_cmd_write(stm401_misc_data,
@@ -529,7 +528,7 @@ ssize_t stm401_misc_write(struct file *file, const char __user *buff,
 				goto EXIT;
 			if (stm401_readbuff[0] != ACK_BYTE) {
 				dev_err(&stm401_misc_data->client->dev,
-					"Error sending memory address 0x%02x\n",
+					"Error sending write memory address 0x%02x\n",
 					stm401_readbuff[0]);
 				err = -EIO;
 				goto EXIT;
@@ -561,10 +560,90 @@ ssize_t stm401_misc_write(struct file *file, const char __user *buff,
 				err = -EIO;
 				goto EXIT;
 			}
-			stm401_misc_data->current_addr += count;
 		}
 		dev_dbg(&stm401_misc_data->client->dev,
 			"Flash write completed\n");
+
+		err = stm401_boot_cmd_write(stm401_misc_data,
+			READ_MEMORY);
+		if (err < 0)
+			goto EXIT;
+
+		err = stm401_boot_i2c_read(stm401_misc_data,
+			stm401_readbuff, 1);
+		if (err < 0)
+			goto EXIT;
+		if (stm401_readbuff[0] != ACK_BYTE) {
+			dev_err(&stm401_misc_data->client->dev,
+			 "Error sending READ_MEMORY command 0x%02x\n",
+				stm401_readbuff[0]);
+			err = -EIO;
+			goto EXIT;
+		}
+
+		index = 0;
+		stm401_cmdbuff[index++]
+			= (stm401_misc_data->current_addr >> 24) & 0xFF;
+		stm401_cmdbuff[index++]
+			= (stm401_misc_data->current_addr >> 16) & 0xFF;
+		stm401_cmdbuff[index++]
+			= (stm401_misc_data->current_addr >> 8) & 0xFF;
+		stm401_cmdbuff[index++]
+			= stm401_misc_data->current_addr & 0xFF;
+		err = stm401_boot_checksum_write(stm401_misc_data,
+			stm401_cmdbuff, index);
+		if (err < 0)
+			goto EXIT;
+
+		err = stm401_boot_i2c_read(stm401_misc_data,
+			stm401_readbuff, 1);
+		if (err < 0)
+			goto EXIT;
+		if (stm401_readbuff[0] != ACK_BYTE) {
+			dev_err(&stm401_misc_data->client->dev,
+				"Error sending read memory address 0x%02x\n",
+				stm401_readbuff[0]);
+			err = -EIO;
+			goto EXIT;
+		}
+
+		err = stm401_boot_cmd_write(stm401_misc_data,
+			(count - 1));
+		if (err < 0)
+			goto EXIT;
+
+		err = stm401_boot_i2c_read(stm401_misc_data,
+			stm401_readbuff, 1);
+		if (err < 0)
+			goto EXIT;
+		if (stm401_readbuff[0] != ACK_BYTE) {
+			dev_err(&stm401_misc_data->client->dev,
+				"Error sending read memory count 0x%02x\n",
+				stm401_readbuff[0]);
+			err = -EIO;
+			goto EXIT;
+		}
+
+		err = stm401_boot_i2c_read(stm401_misc_data,
+			stm401_readbuff, count);
+		if (err < 0)
+			goto EXIT;
+
+		for (index = 0; index < count; index++) {
+			if (stm401_readbuff[index] != buff[index]) {
+				dev_err(&stm401_misc_data->client->dev,
+					"Error verifying write 0x%08x 0x%02x "
+					"0x%02x 0x%02x\n",
+					stm401_misc_data->current_addr,
+					index,
+					stm401_readbuff[index],
+					buff[index]);
+				err = -EIO;
+				goto EXIT;
+			}
+		}
+
+		stm401_misc_data->current_addr += count;
 	} else {
 		dev_dbg(&stm401_misc_data->client->dev,
 			"Normal mode write started\n");

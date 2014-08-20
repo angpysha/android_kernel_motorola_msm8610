@@ -84,6 +84,11 @@ endif
 dtb-$(CONFIG_ARCH_MSM8974)	+= msm8974-v2-abbagoochie-p1.dtb
 dtb-$(CONFIG_ARCH_MSM8974)	+= msm8974pro-ab-abbagoochie-p2.dtb
 dtb-$(CONFIG_ARCH_MSM8974)	+= msm8974pro-ab-abbagoochie-p3.dtb
+dtb-$(CONFIG_ARCH_MSM8974)	+= msm8974pro-ac-abbagoochie-p4.dtb
+dtb-$(CONFIG_ARCH_MSM8974)	+= msm8974pro-ab-victara-p0.dtb
+dtb-$(CONFIG_ARCH_MSM8974)	+= msm8974pro-ab-victara-p1b.dtb
+dtb-$(CONFIG_ARCH_MSM8974)	+= msm8974pro-ac-victara-p1b.dtb
+dtb-$(CONFIG_ARCH_MSM8974)	+= msm8974pro-ab-valocia-p0.dtb
 
 # APQ8084
    zreladdr-$(CONFIG_ARCH_APQ8084)	:= 0x00008000
@@ -152,6 +157,15 @@ ifneq ($(CONFIG_MMI_DEVICE_DTBS),y)
 endif
 
 # MSM8226 Motorola Devices
+ifeq ($(CONFIG_MMI_TITAN_DTB),y)
+dtb-$(CONFIG_ARCH_MSM8226)	+= msm8226-titan.dtb
+else ifeq ($(CONFIG_MMI_PEREGRINE_DTB),y)
+dtb-$(CONFIG_ARCH_MSM8226)	+= msm8926-peregrine-p1.dtb
+dtb-$(CONFIG_ARCH_MSM8226)	+= msm8926-peregrine-p1c.dtb
+dtb-$(CONFIG_ARCH_MSM8226)	+= msm8926-peregrine-p2.dtb
+dtb-$(CONFIG_ARCH_MSM8226)	+= msm8926-peregrine-p2a1.dtb
+dtb-$(CONFIG_ARCH_MSM8226)	+= msm8926-peregrine-p2d.dtb
+else
 dtb-$(CONFIG_ARCH_MSM8226)	+= msm8226-bigfoot-p1.dtb
 dtb-$(CONFIG_ARCH_MSM8226)	+= msm8226-falcon-p1.dtb
 dtb-$(CONFIG_ARCH_MSM8226)	+= msm8226-falcon-p2.dtb
@@ -159,12 +173,7 @@ dtb-$(CONFIG_ARCH_MSM8226)	+= msm8226-falcon-p2-v2.dtb
 dtb-$(CONFIG_ARCH_MSM8226)	+= msm8226-falcon-p2b.dtb
 dtb-$(CONFIG_ARCH_MSM8226)	+= msm8226-falcon-p2b1.dtb
 dtb-$(CONFIG_ARCH_MSM8226)	+= msm8226-falcon-p3c.dtb
-
-# MSM8926 Motorola Devices
-dtb-$(CONFIG_ARCH_MSM8226)	+= msm8926-peregrine-p1.dtb
-dtb-$(CONFIG_ARCH_MSM8226)	+= msm8926-peregrine-p1c.dtb
-dtb-$(CONFIG_ARCH_MSM8226)	+= msm8926-peregrine-p2.dtb
-dtb-$(CONFIG_ARCH_MSM8226)	+= msm8926-peregrine-p2a1.dtb
+endif
 
 ifeq ($(CONFIG_MMI_DEVICE_DTBS),y)
 # Add 1k of padding to the DTBs to allow for environment variables
@@ -212,6 +221,10 @@ dtb-$(CONFIG_ARCH_MSM8610)	+= msm8610-condor-p1c.dtb
 dtb-$(CONFIG_ARCH_MSM8610)	+= msm8610-condor-p1c-v2.dtb
 dtb-$(CONFIG_ARCH_MSM8610)	+= msm8610-condor-p1d.dtb
 dtb-$(CONFIG_ARCH_MSM8610)	+= msm8610-condor-p1d-v2.dtb
+dtb-$(CONFIG_ARCH_MSM8610)	+= msm8610-condor-p2.dtb
+dtb-$(CONFIG_ARCH_MSM8610)	+= msm8610-condor-p2a1.dtb
+dtb-$(CONFIG_ARCH_MSM8610)	+= msm8610-condor-p2b.dtb
+dtb-$(CONFIG_ARCH_MSM8610)	+= msm8610-condor-p2b1.dtb
 
 # MSMSAMARIUM
    zreladdr-$(CONFIG_ARCH_MSMSAMARIUM)	:= 0x00008000

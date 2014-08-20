@@ -18,13 +18,13 @@
 
 #include <linux/cdev.h>
 #include <linux/delay.h>
-#include <linux/earlysuspend.h>
 #include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/export.h>
 #include <linux/of.h>
 #include <linux/of_gpio.h>
 #include <linux/fs.h>
+#include <linux/gfp.h>
 #include <linux/gpio.h>
 #include <linux/i2c.h>
 #include <linux/input.h>
@@ -44,7 +44,6 @@
 
 #include <linux/stm401.h>
 
-
 long stm401_misc_ioctl(struct file *file, unsigned int cmd,
 		unsigned long arg)
 {
@@ -52,15 +51,14 @@ long stm401_misc_ioctl(struct file *file, unsigned int cmd,
 	static int brightness_table_loaded;
 	int err = -ENOTTY;
 	unsigned int addr = 0;
+	unsigned int data_size = 0;
+	unsigned char rw_bytes[4];
 	struct stm401_data *ps_stm401 = file->private_data;
 	unsigned char byte;
-	unsigned char bytes[2];
+	unsigned char bytes[3];
 	unsigned short delay;
 	unsigned long current_posix_time;
 	struct timespec current_time;
-
-	if (ps_stm401->stm401_hub_fail)
-		return -EIO;
 
 	mutex_lock(&ps_stm401->lock);
 	switch (cmd) {
@@ -114,7 +112,11 @@ long stm401_misc_ioctl(struct file *file, unsigned int cmd,
 			dev_err(&ps_stm401->client->dev,
 				"Attempted normal mode ioctl in boot\n");
 			mutex_unlock(&ps_stm401->lock);
-			return -EFAULT;
+			return -EPERM;
+		}
+		if (ps_stm401->stm401_hub_fail) {
+			mutex_unlock(&ps_stm401->lock);
+			return -EPERM;
 		}
 	}
 
@@ -167,6 +169,20 @@ long stm401_misc_ioctl(struct file *file, unsigned int cmd,
 		stm401_g_gyro_delay = delay;
 		err = stm401_i2c_write(ps_stm401, stm401_cmdbuff, 2);
 		break;
+	case STM401_IOCTL_SET_STEP_COUNTER_DELAY:
+		delay = 0;
+		if (copy_from_user(&delay, argp, sizeof(delay))) {
+			dev_dbg(&ps_stm401->client->dev,
+				"Copy step counter delay returned error\n");
+			err = -EFAULT;
+			break;
+		}
+		stm401_cmdbuff[0] = STEP_COUNTER_UPDATE_RATE;
+		stm401_cmdbuff[1] = (delay>>8);
+		stm401_cmdbuff[2] = delay;
+		stm401_g_step_counter_delay = delay;
+		err = stm401_i2c_write(ps_stm401, stm401_cmdbuff, 3);
+		break;
 	case STM401_IOCTL_SET_PRES_DELAY:
 		dev_dbg(&ps_stm401->client->dev,
 			"STM401_IOCTL_SET_PRES_DELAY");
@@ -184,7 +200,7 @@ long stm401_misc_ioctl(struct file *file, unsigned int cmd,
 		break;
 	case STM401_IOCTL_SET_SENSORS:
 		dev_dbg(&ps_stm401->client->dev, "STM401_IOCTL_SET_SENSORS");
-		if (copy_from_user(bytes, argp, 2 * sizeof(unsigned char))) {
+		if (copy_from_user(bytes, argp, 3 * sizeof(unsigned char))) {
 			dev_dbg(&ps_stm401->client->dev,
 				"Copy set sensors returned error\n");
 			err = -EFAULT;
@@ -205,16 +221,17 @@ long stm401_misc_ioctl(struct file *file, unsigned int cmd,
 		stm401_cmdbuff[0] = NONWAKESENSOR_CONFIG;
 		stm401_cmdbuff[1] = bytes[0];
 		stm401_cmdbuff[2] = bytes[1];
-		stm401_g_nonwake_sensor_state = (stm401_cmdbuff[2] << 8)
-			| stm401_cmdbuff[1];
-		err = stm401_i2c_write(ps_stm401, stm401_cmdbuff, 3);
-		dev_dbg(&ps_stm401->client->dev, "Sensor enable = 0x%02X\n",
+		stm401_cmdbuff[3] = bytes[2];
+		stm401_g_nonwake_sensor_state = (stm401_cmdbuff[3] << 16)
+			| (stm401_cmdbuff[2] << 8) | stm401_cmdbuff[1];
+		err = stm401_i2c_write(ps_stm401, stm401_cmdbuff, 4);
+		dev_dbg(&ps_stm401->client->dev, "Sensor enable = 0x%lx\n",
 			stm401_g_nonwake_sensor_state);
 		break;
 	case STM401_IOCTL_GET_SENSORS:
 		dev_dbg(&ps_stm401->client->dev, "STM401_IOCTL_GET_SENSORS");
 		stm401_cmdbuff[0] = NONWAKESENSOR_CONFIG;
-		err = stm401_i2c_write_read(ps_stm401, stm401_cmdbuff, 1, 2);
+		err = stm401_i2c_write_read(ps_stm401, stm401_cmdbuff, 1, 3);
 		if (err < 0) {
 			dev_err(&ps_stm401->client->dev,
 				"Reading get sensors failed\n");
@@ -222,7 +239,8 @@ long stm401_misc_ioctl(struct file *file, unsigned int cmd,
 		}
 		bytes[0] = stm401_readbuff[0];
 		bytes[1] = stm401_readbuff[1];
-		if (copy_to_user(argp, bytes, 2 * sizeof(unsigned char)))
+		bytes[2] = stm401_readbuff[2];
+		if (copy_to_user(argp, bytes, 3 * sizeof(unsigned char)))
 			err = -EFAULT;
 		break;
 	case STM401_IOCTL_SET_WAKESENSORS:
@@ -260,7 +278,7 @@ long stm401_misc_ioctl(struct file *file, unsigned int cmd,
 		break;
 	case STM401_IOCTL_SET_ALGOS:
 		dev_dbg(&ps_stm401->client->dev, "STM401_IOCTL_SET_ALGOS");
-		if (copy_from_user(&bytes, argp, sizeof(bytes))) {
+		if (copy_from_user(&bytes, argp, 2 * sizeof(unsigned char))) {
 			dev_err(&ps_stm401->client->dev,
 				"Copy set algos returned error\n");
 			err = -EFAULT;
@@ -288,7 +306,7 @@ long stm401_misc_ioctl(struct file *file, unsigned int cmd,
 		bytes[1] = stm401_readbuff[1];
 		dev_info(&ps_stm401->client->dev,
 			"Get algos config: 0x%x", (bytes[1] << 8) | bytes[0]);
-		if (copy_to_user(argp, bytes, sizeof(bytes)))
+		if (copy_to_user(argp, bytes, 2 * sizeof(unsigned char)))
 			err = -EFAULT;
 		break;
 	case STM401_IOCTL_GET_MAG_CAL:
@@ -417,6 +435,7 @@ long stm401_misc_ioctl(struct file *file, unsigned int cmd,
 			err = -EFAULT;
 			break;
 		}
+		stm401_g_control_reg_restore = 1;
 		memcpy(stm401_g_control_reg, &stm401_cmdbuff[1],
 			STM401_CONTROL_REG_SIZE);
 
@@ -476,7 +495,7 @@ long stm401_misc_ioctl(struct file *file, unsigned int cmd,
 	case STM401_IOCTL_SET_ALGO_REQ:
 		dev_dbg(&ps_stm401->client->dev, "STM401_IOCTL_SET_ALGO_REQ");
 		/* copy algo into bytes[2] */
-		if (copy_from_user(&bytes, argp, sizeof(bytes))) {
+		if (copy_from_user(&bytes, argp, 2 * sizeof(unsigned char))) {
 			dev_err(&ps_stm401->client->dev,
 				"Set algo req copy bytes returned error\n");
 			err = -EFAULT;
@@ -484,7 +503,8 @@ long stm401_misc_ioctl(struct file *file, unsigned int cmd,
 		}
 		addr = (bytes[1] << 8) | bytes[0];
 		/* copy len into byte */
-		if (copy_from_user(&byte, argp + sizeof(bytes), sizeof(byte))) {
+		if (copy_from_user(&byte, argp + 2 * sizeof(unsigned char),
+				sizeof(byte))) {
 			dev_err(&ps_stm401->client->dev,
 				"Set algo req copy byte returned error\n");
 			err = -EFAULT;
@@ -504,7 +524,8 @@ long stm401_misc_ioctl(struct file *file, unsigned int cmd,
 			break;
 		}
 		if (copy_from_user(&stm401_cmdbuff[1],
-			argp + sizeof(bytes) + sizeof(byte), byte)) {
+			argp + 2 * sizeof(unsigned char)
+			+ sizeof(byte), byte)) {
 			dev_err(&ps_stm401->client->dev,
 				"Set algo req copy req info returned error\n");
 			err = -EFAULT;
@@ -518,7 +539,7 @@ long stm401_misc_ioctl(struct file *file, unsigned int cmd,
 	case STM401_IOCTL_GET_ALGO_EVT:
 		dev_dbg(&ps_stm401->client->dev, "STM401_IOCTL_GET_ALGO_EVT");
 		/* copy algo into bytes[2] */
-		if (copy_from_user(&bytes, argp, sizeof(bytes))) {
+		if (copy_from_user(&bytes, argp, 2 * sizeof(unsigned char))) {
 			dev_err(&ps_stm401->client->dev,
 				"Get algo evt copy bytes returned error\n");
 			err = -EFAULT;
@@ -545,10 +566,150 @@ long stm401_misc_ioctl(struct file *file, unsigned int cmd,
 				"Get algo evt failed\n");
 			break;
 		}
-		if (copy_to_user(argp + sizeof(bytes), stm401_readbuff,
-			stm401_algo_info[addr].evt_size))
+		if (copy_to_user(argp + 2 * sizeof(unsigned char),
+			stm401_readbuff, stm401_algo_info[addr].evt_size))
 			err = -EFAULT;
 		break;
+		case STM401_IOCTL_WRITE_REG:
+			dev_dbg(&ps_stm401->client->dev,
+				"STM401_IOCTL_WRITE_REG");
+
+			/* copy addr and size */
+			if (copy_from_user(&rw_bytes, argp, sizeof(rw_bytes))) {
+				dev_err(&ps_stm401->client->dev,
+					"Write Reg, copy bytes returned error\n");
+				err = -EFAULT;
+				break;
+			}
+			addr = (rw_bytes[0] << 8) | rw_bytes[1];
+			data_size = (rw_bytes[2] << 8) | rw_bytes[3];
+
+			/* fail if the write size is too large */
+			if (data_size > 512 - 1) {
+				err = -EFAULT;
+				dev_err(&ps_stm401->client->dev,
+					"Write Reg, data_size > %d\n",
+					512 - 1);
+				break;
+			}
+
+			/* copy in the data */
+			if (copy_from_user(&stm401_cmdbuff[1], argp +
+				sizeof(rw_bytes), data_size)) {
+				dev_err(&ps_stm401->client->dev,
+					"Write Reg copy from user returned error\n");
+				err = -EFAULT;
+				break;
+			}
+
+			/* setup the address */
+			stm401_cmdbuff[0] = addr;
+
+			/* + 1 for the address in [0] */
+			err = stm401_i2c_write(ps_stm401, stm401_cmdbuff,
+				data_size + 1);
+
+			if (err < 0)
+				dev_err(&stm401_misc_data->client->dev,
+					"Write Reg unable to write to direct reg %d\n",
+					err);
+			break;
+		case STM401_IOCTL_READ_REG:
+			dev_dbg(&ps_stm401->client->dev,
+				"STM401_IOCTL_READ_REG");
+
+			/* copy addr and size */
+			if (copy_from_user(&rw_bytes, argp, sizeof(rw_bytes))) {
+				dev_err(&ps_stm401->client->dev,
+				    "Read Reg, copy bytes returned error\n");
+				err = -EFAULT;
+				break;
+			}
+			addr = (rw_bytes[0] << 8) | rw_bytes[1];
+			data_size = (rw_bytes[2] << 8) | rw_bytes[3];
+
+			/* setup the address */
+			stm401_cmdbuff[0] = addr;
+			err = stm401_i2c_write_read(ps_stm401,
+				stm401_cmdbuff, 1, data_size);
+
+			if (err < 0)
+				dev_err(&stm401_misc_data->client->dev,
+					"Read Reg, unable to read from direct reg %d\n",
+					err);
+
+			if (copy_to_user(argp, stm401_readbuff, data_size)) {
+				dev_err(&ps_stm401->client->dev,
+					"Read Reg error copying to user\n");
+				err = -EFAULT;
+				break;
+			}
+			break;
+	case STM401_IOCTL_GET_IR_CONFIG:
+		dev_dbg(&ps_stm401->client->dev, "STM401_IOCTL_GET_IR_CONFIG");
+		if (copy_from_user(&byte, argp, 1)) {
+			dev_err(&ps_stm401->client->dev,
+				"Copy size from user returned error\n");
+			err = -EFAULT;
+			break;
+		}
+		if (byte > sizeof(stm401_g_ir_config_reg)) {
+			dev_err(&ps_stm401->client->dev,
+				"IR Config too big: %d > %d\n", byte,
+				sizeof(stm401_g_ir_config_reg));
+			err = -EINVAL;
+			break;
+		}
+
+		stm401_cmdbuff[0] = IR_CONFIG;
+		err = stm401_i2c_write_read(ps_stm401, stm401_cmdbuff, 1, byte);
+		if (err < 0) {
+			dev_err(&ps_stm401->client->dev,
+				"Get IR config failed: %d\n", err);
+			break;
+		}
+		if (copy_to_user(argp, stm401_readbuff, byte))
+			err = -EFAULT;
+
+		break;
+	case STM401_IOCTL_SET_IR_CONFIG:
+		dev_dbg(&ps_stm401->client->dev, "STM401_IOCTL_SET_IR_CONFIG");
+		stm401_cmdbuff[0] = IR_CONFIG;
+		if (copy_from_user(&stm401_cmdbuff[1], argp, 1)) {
+			dev_err(&ps_stm401->client->dev,
+				"Copy size from user returned error\n");
+			err = -EFAULT;
+			break;
+		}
+		if (stm401_cmdbuff[1] > sizeof(stm401_g_ir_config_reg)) {
+			dev_err(&ps_stm401->client->dev,
+				"IR Config too big: %d > %d\n",
+				stm401_cmdbuff[1],
+				sizeof(stm401_g_ir_config_reg));
+			err = -EINVAL;
+			break;
+		}
+		if (copy_from_user(&stm401_cmdbuff[2], argp + 1,
+					stm401_cmdbuff[1] - 1)) {
+			dev_err(&ps_stm401->client->dev,
+				"Copy data from user returned error\n");
+			err = -EFAULT;
+			break;
+		}
+		stm401_g_ir_config_reg_restore = 1;
+		memcpy(stm401_g_ir_config_reg, &stm401_cmdbuff[1],
+			stm401_cmdbuff[1]);
+
+		err = stm401_i2c_write(ps_stm401, stm401_cmdbuff,
+				stm401_cmdbuff[1] + 1);
+		dev_dbg(&stm401_misc_data->client->dev,
+			"SET_IR_CONFIG: Writing %d bytes (err=%d)\n",
+			stm401_cmdbuff[1] + 1, err);
+		if (err < 0)
+			dev_err(&stm401_misc_data->client->dev,
+				"Unable to write IR config reg %d\n", err);
+		break;
+
 	/* No default here since previous switch could have
 	   handled the command and cannot over write that */
 	}

@@ -52,6 +52,8 @@
 				SND_JACK_UNSUPPORTED)
 #define TPA6165A2_JACK_BUTTON_MASK (SND_JACK_BTN_0)
 
+#define VDD_UA_ON_LOAD	10000
+
 static struct snd_soc_jack hs_jack;
 static struct snd_soc_jack button_jack;
 
@@ -590,7 +592,14 @@ static int tpa6165_update_device_status(struct tpa6165_data *tpa6165)
 
 static void tpa6165_delayed_mono_work(struct work_struct *work)
 {
+	int err;
 	struct tpa6165_data *tpa6165 = i2c_get_clientdata(tpa6165_client);
+
+	if (!tpa6165->inserted) {
+		err = regulator_set_optimum_mode(tpa6165->vdd, VDD_UA_ON_LOAD);
+		if (err < 0)
+			pr_err("%s: failed to set optimum mode\n", __func__);
+	}
 
 	/* check for button press state to determine hs type */
 	tpa6165_update_device_status(tpa6165);
@@ -637,6 +646,10 @@ static void tpa6165_delayed_mono_work(struct work_struct *work)
 				tpa6165->hs_jack->jack->type);
 		tpa6165->mono_hs_detect_state = 0;
 	}
+
+	if (!tpa6165->inserted)
+		regulator_set_optimum_mode(tpa6165->vdd, 0);
+
 	return;
 }
 
@@ -944,6 +957,12 @@ static int tpa6165_report_hs(struct tpa6165_data *tpa6165)
 		tpa6165_sleep(tpa6165, TPA6165_SLEEP);
 	} else if ((tpa6165->dev_status_reg1 & TPA6165_JACK_DETECT) &&
 			tpa6165->inserted) {
+		/* in some case there is a hardware reset when display off with
+		 * with headset inserted.
+		 */
+		if (tpa6165->dev_status_reg3 & TPA6165_DEVICE_RESET)
+			schedule_work(&tpa6165->work);
+
 		/* no change in jack detect state, check for Button press*/
 		tpa6165_report_button(tpa6165);
 
@@ -963,8 +982,9 @@ static int tpa6165_report_hs(struct tpa6165_data *tpa6165)
 	 * putting the device the sleep to minimize pops.
 	 */
 	if (tpa6165->dev_status_reg1 & TPA6165_VOL_SLEW_DONE) {
-		if (tpa6165->amp_state == TPA6165_AMP_DISABLED &&
-				tpa6165->mic_state == TPA6165_MIC_DISABLED) {
+		if ((tpa6165->amp_state == TPA6165_AMP_DISABLED) &&
+				(tpa6165->mic_state == TPA6165_MIC_DISABLED)
+				&& (!tpa6165->button_detect_state)) {
 			/* put the IC in sleep mode */
 			if ((tpa6165->alwayson_micb || tpa6165->special_hs)
 				&& tpa6165->inserted)
@@ -983,6 +1003,7 @@ static int tpa6165_report_hs(struct tpa6165_data *tpa6165)
 
 static void tpa6165_poll_acc_det(struct work_struct *work)
 {
+	int err;
 	struct tpa6165_data *tpa6165 =
 				i2c_get_clientdata(tpa6165_client);
 	int force_type = 0;
@@ -999,6 +1020,10 @@ static void tpa6165_poll_acc_det(struct work_struct *work)
 		pr_debug("tpa6165: not completely resumed yet  ..\n");
 		goto poll;
 	}
+
+	err = regulator_set_optimum_mode(tpa6165->vdd, VDD_UA_ON_LOAD);
+	if (err < 0)
+		pr_err("%s: failed to set optimum mode\n", __func__);
 
 	pr_debug("tpa6165: polling for accessory ..\n");
 	/* disable interrupts, clear interrupt mask regs */
@@ -1123,6 +1148,9 @@ static void tpa6165_poll_acc_det(struct work_struct *work)
 		0xc2, 0xff);
 	tpa6165_reg_write(tpa6165, TPA6165_INT_MASK_REG2,
 		0x4, 0xff);
+
+	if (!tpa6165->inserted)
+		regulator_set_optimum_mode(tpa6165->vdd, 0);
 
 	pr_debug("tpa6165 polling for accessory done ..\n");
 
@@ -1263,9 +1291,22 @@ int tpa6165_hs_detect(struct snd_soc_codec *codec)
 		snd_soc_add_codec_controls(codec, tpa6165_controls,
 						ARRAY_SIZE(tpa6165_controls));
 		mutex_lock(&tpa6165->lock);
+
+		if (!tpa6165->inserted) {
+			ret = regulator_set_optimum_mode(tpa6165->vdd,
+							 VDD_UA_ON_LOAD);
+			if (ret < 0)
+				pr_err("%s: failed to set optimum mode\n",
+					__func__);
+		}
+
 		/* check device status registers for boot time detection */
 		tpa6165_update_device_status(tpa6165);
 		ret = tpa6165_report_hs(tpa6165);
+
+		if (!tpa6165->inserted)
+			regulator_set_optimum_mode(tpa6165->vdd, 0);
+
 		mutex_unlock(&tpa6165->lock);
 	}
 
@@ -1317,6 +1358,7 @@ static irqreturn_t tpa6165_irq_handler(int irq, void *data)
 
 static void tpa6165_det_thread(struct work_struct *work)
 {
+	int err;
 	struct tpa6165_data *irq_data =
 				i2c_get_clientdata(tpa6165_client);
 
@@ -1336,8 +1378,18 @@ static void tpa6165_det_thread(struct work_struct *work)
 		mutex_unlock(&irq_data->lock);
 		return;
 	}
+
+	if (!irq_data->inserted) {
+		err = regulator_set_optimum_mode(irq_data->vdd, VDD_UA_ON_LOAD);
+		if (err < 0)
+			pr_err("%s: failed to set optimum mode\n", __func__);
+	}
+
 	tpa6165_update_device_status(irq_data);
 	tpa6165_report_hs(irq_data);
+
+	if (!irq_data->inserted)
+		regulator_set_optimum_mode(irq_data->vdd, 0);
 
 	/* timed wake lock here so that user space wakeup in time */
 	wake_lock_timeout(&irq_data->wake_lock, HZ/2);
@@ -1515,6 +1567,7 @@ gpio_init_fail:
 static int __devexit tpa6165_remove(struct i2c_client *client)
 {
 	struct tpa6165_data *tpa6165 = i2c_get_clientdata(client);
+	regulator_set_optimum_mode(tpa6165->vdd, 0);
 	regulator_disable(tpa6165->vdd);
 	regulator_put(tpa6165->vdd);
 	regulator_disable(tpa6165->micvdd);

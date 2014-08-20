@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2014, Linux Foundation. All rights reserved.
+/* Copyright (c) 2009-2013, Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -105,6 +105,7 @@ static bool mhl_det_in_progress;
 static int factory_kill_gpio;
 static int factory_kill_gpio_active_high;
 static int factory_cable;
+static bool factory_mode;
 
 static struct regulator *hsusb_3p3;
 static struct regulator *hsusb_1p8;
@@ -1350,7 +1351,7 @@ static int msm_otg_notify_chg_type(struct msm_otg *motg)
 		motg->chg_type == USB_ACA_C_CHARGER))
 		charger_type = POWER_SUPPLY_TYPE_USB_ACA;
 	else
-		charger_type = POWER_SUPPLY_TYPE_UNKNOWN;
+		charger_type = POWER_SUPPLY_TYPE_USB;
 
 	if (!psy) {
 		pr_err("No USB power supply registered!\n");
@@ -2583,10 +2584,6 @@ static void msm_otg_sm_work(struct work_struct *w)
 	bool work = 0, srp_reqd, dcp;
 
 	pm_runtime_resume(otg->phy->dev);
-	if (motg->pm_done) {
-		pm_runtime_get_sync(otg->phy->dev);
-		motg->pm_done = 0;
-	}
 	pr_debug("%s work\n", otg_state_string(otg->phy->state));
 	switch (otg->phy->state) {
 	case OTG_STATE_UNDEFINED:
@@ -2733,7 +2730,8 @@ static void msm_otg_sm_work(struct work_struct *w)
 			 * switch from ACA to PMIC.  Check ID state
 			 * before entering into low power mode.
 			 */
-			if (!msm_otg_read_pmic_id_state(motg)) {
+			if (aca_enabled() &&
+					!msm_otg_read_pmic_id_state(motg)) {
 				pr_debug("process missed ID intr\n");
 				clear_bit(ID, &motg->inputs);
 				work = 1;
@@ -2746,7 +2744,13 @@ static void msm_otg_sm_work(struct work_struct *w)
 			 */
 			pm_runtime_mark_last_busy(otg->phy->dev);
 			pm_runtime_autosuspend(otg->phy->dev);
-			motg->pm_done = 1;
+			/* Re-enable ID IRQ's if they are masked */
+			if (motg->pdata->pmic_id_irq &&
+				atomic_read(&motg->pmic_id_masked) &&
+				!factory_mode) {
+				enable_irq(motg->pdata->pmic_id_irq);
+				atomic_set(&motg->pmic_id_masked, 0);
+			}
 		}
 		break;
 	case OTG_STATE_B_SRP_INIT:
@@ -3419,6 +3423,17 @@ static void msm_otg_set_vbus_state(int online)
 		motg->sm_work_pending = true;
 	else
 		queue_work(system_nrt_wq, &motg->sm_work);
+
+	/*
+	* Disable ID IRQ's when not in factory mode when
+	* a Vbus related event is going on.
+	*/
+	if (motg->pdata->pmic_id_irq &&
+		!atomic_read(&motg->pmic_id_masked) &&
+		!factory_mode) {
+		disable_irq(motg->pdata->pmic_id_irq);
+		atomic_set(&motg->pmic_id_masked, 1);
+	}
 }
 
 static int msm_pmic_is_factory_cable(struct msm_otg *motg)
@@ -3463,8 +3478,9 @@ static void msm_pmic_id_status_w(struct work_struct *w)
 	pr_debug("PMIC: ID FLT %d\n", id_flt);
 
 	if (!id_gnd && !id_flt) {
-		pr_info_once("Factory Cable Attached!\n");
-		factory_cable = 1;
+		factory_cable = msm_pmic_is_factory_cable(motg);
+		if (factory_cable)
+			pr_info_once("Factory Cable Attached!\n");
 	} else
 		if (factory_cable) {
 			pr_info("Factory Cable Detached!\n");
@@ -4908,8 +4924,8 @@ static int __init msm_otg_probe(struct platform_device *pdev)
 	if (ret)
 		dev_dbg(&pdev->dev, "fail to setup cdev\n");
 
-	factory_cable = msm_pmic_mmi_factory_mode() ||
-				msm_pmic_is_factory_cable(motg);
+	factory_mode = msm_pmic_mmi_factory_mode();
+	factory_cable = factory_mode || msm_pmic_is_factory_cable(motg);
 	msm_otg_get_factory_kill_gpio();
 	return 0;
 
@@ -5119,7 +5135,6 @@ static int msm_otg_runtime_resume(struct device *dev)
 
 	dev_dbg(dev, "OTG runtime resume\n");
 	pm_runtime_get_noresume(dev);
-	motg->pm_done = 0;
 	return msm_otg_resume(motg);
 }
 #endif
@@ -5147,7 +5162,6 @@ static int msm_otg_pm_resume(struct device *dev)
 
 	dev_dbg(dev, "OTG PM resume\n");
 
-	motg->pm_done = 0;
 	atomic_set(&motg->pm_suspended, 0);
 	if (motg->async_int || motg->sm_work_pending) {
 		pm_runtime_get_noresume(dev);

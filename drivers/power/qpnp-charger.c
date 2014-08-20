@@ -172,6 +172,7 @@
 #define CHGWDDOG_IRQ			BIT(2)
 #define VBAT_DET_HI_IRQ			BIT(1)
 #define VBAT_DET_LOW_IRQ		BIT(0)
+#define CHG_BMS_SIGN_BIT		BIT(7)
 
 /* smbb_buck_interrupts */
 #define VDD_LOOP_IRQ			BIT(6)
@@ -391,6 +392,7 @@ struct qpnp_chg_chip {
 	bool				power_stage_workaround_running;
 	bool				power_stage_workaround_enable;
 	char				shutdown_needed;
+	bool                            use_step_charge;
 	unsigned int			step_charge_mv;
 	unsigned int			step_charge_ma;
 	unsigned int			cutoff_mv;
@@ -1853,11 +1855,6 @@ qpnp_chg_chgr_chg_fastchg_irq_handler(int irq, void *_chip)
 		power_supply_changed(&chip->dc_psy);
 	}
 
-	if (chip->resuming_charging) {
-		chip->resuming_charging = false;
-		qpnp_chg_set_appropriate_vbatdet(chip);
-	}
-
 	if (!chip->charging_disabled) {
 		schedule_delayed_work(&chip->eoc_work,
 			msecs_to_jiffies(EOC_CHECK_PERIOD_MS));
@@ -2355,7 +2352,6 @@ get_prop_capacity(struct qpnp_chg_chip *chip)
 				&& !chip->out_of_temp
 				&& !chip->ext_hi_temp
 				&& charger_in
-				&& !chip->resuming_charging
 				&& !chip->charging_disabled
 				&& chip->soc_resume_limit
 				&& soc <= chip->soc_resume_limit) {
@@ -2363,6 +2359,7 @@ get_prop_capacity(struct qpnp_chg_chip *chip)
 			chip->resuming_charging = true;
 			qpnp_chg_irq_wake_enable(&chip->chg_fastchg);
 			qpnp_chg_set_appropriate_vbatdet(chip);
+			chip->resuming_charging = false;
 			qpnp_chg_charge_en(chip, !chip->charging_disabled);
 		}
 		if (soc == 0) {
@@ -2806,6 +2803,9 @@ qpnp_chg_set_appropriate_battery_current(struct qpnp_chg_chip *chip)
 	if (chip->bat_is_warm)
 		chg_current = min(chg_current, chip->warm_bat_chg_ma);
 
+	if (chip->use_step_charge)
+		chg_current = min(chg_current, chip->step_charge_ma);
+
 	if (chip->therm_lvl_sel != 0 && chip->thermal_mitigation)
 		chg_current = min(chg_current,
 			chip->thermal_mitigation[chip->therm_lvl_sel]);
@@ -2813,6 +2813,9 @@ qpnp_chg_set_appropriate_battery_current(struct qpnp_chg_chip *chip)
 	pr_debug("setting %d mA\n", chg_current);
 	qpnp_chg_ibatmax_set(chip, chg_current);
 }
+
+static int num_thermal_levels;
+module_param(num_thermal_levels, int, 0444);
 
 static void
 qpnp_batt_system_temp_level_set(struct qpnp_chg_chip *chip, int lvl_sel)
@@ -3328,12 +3331,13 @@ qpnp_eoc_work(struct work_struct *work)
 			chip->step_charge_mv) {
 			pr_debug("Step Rate used Batt V = %d\n",
 				(get_prop_battery_voltage_now(chip)/1000));
-			qpnp_chg_ibatmax_set(chip, chip->step_charge_ma);
+			chip->use_step_charge = true;
 		} else {
 			pr_debug("Step Rate NOT used Batt V = %d\n",
 				(get_prop_battery_voltage_now(chip)/1000));
-			qpnp_chg_ibatmax_set(chip, chip->max_bat_chg_current);
+			chip->use_step_charge = false;
 		}
+		qpnp_chg_set_appropriate_battery_current(chip);
 	}
 
 	qpnp_chg_charge_en(chip, (!chip->charging_disabled &&
@@ -3437,10 +3441,12 @@ qpnp_eoc_work(struct work_struct *work)
 				chip->chrg_ocv_cc_ef_uah =
 					get_prop_charge_counter(chip);
 				qpnp_chg_charge_en(chip, 0);
+#ifdef QCOM_WA
 				/* sleep for a second before enabling */
 				msleep(2000);
 				qpnp_chg_charge_en(chip,
 						!chip->charging_disabled);
+#endif
 				pr_debug("psy changed batt_psy\n");
 				power_supply_changed(&chip->batt_psy);
 				qpnp_chg_enable_irq(&chip->chg_vbatdet_lo);
@@ -3621,7 +3627,7 @@ qpnp_chg_adc_notification(enum qpnp_tm_state state, void *ctx)
 		chip->bat_is_warm = bat_warm;
 		chip->out_of_temp = out_temp;
 
-		if (bat_cool || bat_warm)
+		if ((bat_cool || bat_warm) && chip->ext_hi_temp)
 			chip->resuming_charging = false;
 		else
 			chip->resuming_charging = true;
@@ -3663,6 +3669,9 @@ static void update_heartbeat(struct work_struct *work)
 	struct qpnp_chg_chip *chip = container_of(dwork,
 				struct qpnp_chg_chip, update_heartbeat_work);
 	int temp = 0;
+	int rc = 0;
+	u8 bat_chg_sts;
+	union power_supply_propval ret = {0,};
 
 	/*
 	 * In pm8110/pm8226 there is automated BTM which takes care of
@@ -3675,6 +3684,35 @@ static void update_heartbeat(struct work_struct *work)
 		       temp);
 		power_supply_changed(&chip->batt_psy);
 	}
+
+	/* CHG_BMS_SIGN_BIT is BMS_SIGN bit, 0: discharging; 1: charging
+	 * A work around for, charging ICON getting displayed
+	 * even after charger removal, when PMIC fails to trigger irq's
+	 * for some reason.
+	 */
+	if (chip->usb_psy)
+		chip->usb_psy->get_property(chip->usb_psy,
+			POWER_SUPPLY_PROP_ONLINE, &ret);
+
+	rc = qpnp_chg_read(chip, &bat_chg_sts,
+		(chip->chgr_base + CHGR_IBAT_STS), 1);
+	if (rc)
+		pr_err("failed to read CHG sts %d\n", rc);
+	else if (!(bat_chg_sts & CHG_BMS_SIGN_BIT) &&
+			ret.intval) {
+		if (qpnp_chg_is_usb_chg_plugged_in(chip))
+			pr_err("USB valid bit is set 1\n");
+		else {
+			/* USB accessory is not connected and USB PSY is online
+			 * hence trigger USBIN-valid Irq handler to do the
+			 * appropriate changes
+			 */
+			pr_err("USB valid bit is set 0");
+			qpnp_chg_usb_usbin_valid_irq_handler(
+				chip->usbin_valid.irq, chip);
+		}
+	}
+
 	schedule_delayed_work(&chip->update_heartbeat_work,
 		msecs_to_jiffies(UPDATE_HEARTBEAT_MS));
 }
@@ -4825,6 +4863,7 @@ qpnp_charger_read_dt_props(struct qpnp_chg_chip *chip)
 			return rc;
 		}
 	}
+	num_thermal_levels = chip->thermal_levels;
 
 	return rc;
 }
@@ -5216,6 +5255,7 @@ qpnp_charger_probe(struct spmi_device *spmi)
 		msecs_to_jiffies(EOC_CHECK_PERIOD_MS));
 	schedule_delayed_work(&chip->update_heartbeat_work,
 		msecs_to_jiffies(UPDATE_HEARTBEAT_MS));
+	pm_wakeup_event(chip->dev, 15000);
 	pr_info("success chg_dis = %d, bpd = %d, usb = %d, dc = %d b_health = %d batt_present = %d\n",
 			chip->charging_disabled,
 			chip->bpd_detection,

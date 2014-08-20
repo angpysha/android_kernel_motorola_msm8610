@@ -97,6 +97,19 @@
 #define SYDBG(fmt, args...)	printk(KERN_ERR "%s: " fmt, __func__, ##args)
 #define SYDBG_REG(subpkt, fld) SYDBG(#subpkt "." #fld " = 0x%02X\n", subpkt.fld)
 
+static void synaptics_dsx_resumeinfo_start(
+		struct synaptics_rmi4_data *rmi4_data);
+static void synaptics_dsx_resumeinfo_finish(
+		struct synaptics_rmi4_data *rmi4_data);
+static void synaptics_dsx_resumeinfo_isr(
+		struct synaptics_rmi4_data *rmi4_data);
+static void synaptics_dsx_resumeinfo_purgeoff(
+		struct synaptics_rmi4_data *rmi4_data);
+static void synaptics_dsx_resumeinfo_ignore(
+		struct synaptics_rmi4_data *rmi4_data);
+static void synaptics_dsx_resumeinfo_touch(
+		struct synaptics_rmi4_data *rmi4_data);
+
 /* F12 packet register description */
 
 static struct {
@@ -640,17 +653,26 @@ static inline struct synaptics_dsx_platform_data *
 #define letter_s	's'
 #define letter_t	't'
 
-static void synaptics_dsx_darn_product_string(unsigned char *id,
-		unsigned char *hyphen)
+static void synaptics_dsx_darn_product_string(unsigned char *id, size_t len)
 {
-	if (*(hyphen+1) == toupper(letter_t)) {
-		memmove(id+1, id, hyphen-id);
-		hyphen++;
-		*hyphen++ = letter_t;
-	} else if (*(hyphen+1) == toupper(letter_i))
-		*hyphen++ = letter_i;
-	*id = letter_s;
-	*hyphen = 0;
+	unsigned char *hyphen;
+
+	hyphen = strnchr(id, len, HYPHEN);
+	if (hyphen) {
+		if (*(hyphen+1) == toupper(letter_t)) {
+			memmove(id+1, id, hyphen-id);
+			hyphen++;
+			*hyphen++ = letter_t;
+		} else if (*(hyphen+1) == toupper(letter_i))
+			*hyphen++ = letter_i;
+		*id = letter_s;
+		*hyphen = 0;
+	} else {
+		int i;
+		for (i = 0; *(id+i) != 0; i++)
+			if (isupper(*(id+i)))
+				*(id+i) = tolower(*(id+i));
+	}
 }
 
 static int synaptics_rmi4_i2c_read(struct synaptics_rmi4_data *rmi4_data,
@@ -1134,7 +1156,7 @@ static ssize_t synaptics_rmi4_resume_show(struct device *dev,
 				"No resume information found.\n");
 
 	offset += scnprintf(buf + offset, PAGE_SIZE - offset,
-		"Count\tStart\t\tFinish\t# no-events\t"
+		"Count\tStart\t\tFinish\t# ignored\t"
 		"ISR\t\tpurge off\tsendevent\n");
 
 	for (i = 0; i < rmi4_data->number_resumes; i++) {
@@ -1528,7 +1550,6 @@ exit:
 static int synaptics_rmi4_f12_abs_report(struct synaptics_rmi4_data *rmi4_data,
 		struct synaptics_rmi4_fn *fhandler)
 {
-	struct synaptics_rmi4_resume_info *tmp_resume_i = NULL;
 	int retval;
 	unsigned char touch_count = 0; /* number of touch points */
 	unsigned char index = 0;
@@ -1542,6 +1563,7 @@ static int synaptics_rmi4_f12_abs_report(struct synaptics_rmi4_data *rmi4_data,
 	int p;
 	int w;
 	int id;
+	struct timespec hw_time = ktime_to_timespec(ktime_get());
 
 	fingers_supported = fhandler->num_of_data_points;
 	data_addr = fhandler->full_addr.data_base;
@@ -1554,24 +1576,24 @@ static int synaptics_rmi4_f12_abs_report(struct synaptics_rmi4_data *rmi4_data,
 	if (retval < 0)
 		return 0;
 
-	if (rmi4_data->number_resumes > 0) {
-		tmp_resume_i =
-			&(rmi4_data->resume_info[rmi4_data->last_resume]);
+	if (atomic_read(&rmi4_data->panel_off_flag)) {
+		synaptics_dsx_resumeinfo_ignore(rmi4_data);
+		return 0;
+	} else
+		synaptics_dsx_resumeinfo_purgeoff(rmi4_data);
 
-		if (atomic_read(&rmi4_data->panel_off_flag)) {
-			tmp_resume_i->ignored_events++;
-			return 0;
-		}
-		if (tmp_resume_i->purge_off.tv_sec == 0)
-			getnstimeofday(&(tmp_resume_i->purge_off));
-	} else {
-		if (atomic_read(&rmi4_data->panel_off_flag)) {
-			return 0;
-		}
-	}
+	input_event(rmi4_data->input_dev, EV_SYN,
+			SYN_TIME_SEC, hw_time.tv_sec);
+	input_event(rmi4_data->input_dev, EV_SYN,
+			SYN_TIME_NSEC, hw_time.tv_nsec);
 
 	for (finger = 0; finger < fingers_supported; finger++,
 			 index += fhandler->size_of_data_register_block) {
+#ifdef TYPE_B_PROTOCOL
+		input_mt_slot(rmi4_data->input_dev, finger);
+		input_mt_report_slot_state(rmi4_data->input_dev,
+				MT_TOOL_FINGER, finger_data[index] != 0);
+#endif
 		if (finger_data[index] == 0)
 			continue;
 
@@ -1601,21 +1623,24 @@ static int synaptics_rmi4_f12_abs_report(struct synaptics_rmi4_data *rmi4_data,
 					ABS_MT_POSITION_Y, y);
 		input_report_abs(rmi4_data->input_dev,
 					ABS_MT_PRESSURE, p);
+#ifdef REPORT_2D_W
 		input_report_abs(rmi4_data->input_dev,
 					ABS_MT_TOUCH_MAJOR, w);
+#endif
 		input_report_abs(rmi4_data->input_dev,
 					ABS_MT_TRACKING_ID, id);
+#ifndef TYPE_B_PROTOCOL
 		input_mt_sync(rmi4_data->input_dev);
+#endif
 		touch_count++;
 
-		if (rmi4_data->number_resumes > 0 &&
-			tmp_resume_i->send_touch.tv_sec == 0)
-			getnstimeofday(&(tmp_resume_i->send_touch));
+		synaptics_dsx_resumeinfo_touch(rmi4_data);
 	}
 
+#ifndef TYPE_B_PROTOCOL
 	if (!touch_count)
 		input_mt_sync(rmi4_data->input_dev);
-
+#endif
 	input_sync(rmi4_data->input_dev);
 
 	return touch_count;
@@ -1673,8 +1698,11 @@ static int synaptics_rmi4_f11_abs_report(struct synaptics_rmi4_data *rmi4_data,
 	if (retval < 0)
 		return 0;
 
-	if (atomic_read(&rmi4_data->panel_off_flag))
+	if (atomic_read(&rmi4_data->panel_off_flag)) {
+		synaptics_dsx_resumeinfo_ignore(rmi4_data);
 		return 0;
+	} else
+		synaptics_dsx_resumeinfo_purgeoff(rmi4_data);
 
 	input_event(rmi4_data->input_dev, EV_SYN,
 			SYN_TIME_SEC, hw_time.tv_sec);
@@ -1750,6 +1778,8 @@ static int synaptics_rmi4_f11_abs_report(struct synaptics_rmi4_data *rmi4_data,
 			input_mt_sync(rmi4_data->input_dev);
 #endif
 			touch_count++;
+
+			synaptics_dsx_resumeinfo_touch(rmi4_data);
 		}
 	}
 
@@ -1801,8 +1831,11 @@ static void synaptics_rmi4_f1a_report(struct synaptics_rmi4_data *rmi4_data,
 		return;
 	}
 
-	if (atomic_read(&rmi4_data->panel_off_flag))
+	if (atomic_read(&rmi4_data->panel_off_flag)) {
+		synaptics_dsx_resumeinfo_ignore(rmi4_data);
 		return;
+	} else
+		synaptics_dsx_resumeinfo_purgeoff(rmi4_data);
 
 	data = f1a->button_data_buffer;
 
@@ -1854,6 +1887,7 @@ static void synaptics_rmi4_f1a_report(struct synaptics_rmi4_data *rmi4_data,
 				f1a->button_map[button],
 				status);
 #endif
+		synaptics_dsx_resumeinfo_touch(rmi4_data);
 	}
 
 	input_sync(rmi4_data->input_dev);
@@ -1937,6 +1971,8 @@ static void synaptics_rmi4_report_touch(struct synaptics_rmi4_data *rmi4_data,
 		break;
 
 	case SYNAPTICS_RMI4_F11:
+		synaptics_dsx_resumeinfo_isr(rmi4_data);
+
 		touch_count_2d = synaptics_rmi4_f11_abs_report(rmi4_data,
 				fhandler);
 
@@ -1949,6 +1985,8 @@ static void synaptics_rmi4_report_touch(struct synaptics_rmi4_data *rmi4_data,
 		break;
 
 	case SYNAPTICS_RMI4_F12:
+		synaptics_dsx_resumeinfo_isr(rmi4_data);
+
 		touch_count_2d = synaptics_rmi4_f12_abs_report(rmi4_data,
 				fhandler);
 
@@ -1961,6 +1999,8 @@ static void synaptics_rmi4_report_touch(struct synaptics_rmi4_data *rmi4_data,
 		break;
 
 	case SYNAPTICS_RMI4_F1A:
+		synaptics_dsx_resumeinfo_isr(rmi4_data);
+
 		synaptics_rmi4_f1a_report(rmi4_data, fhandler);
 		break;
 
@@ -2052,7 +2092,6 @@ static int synaptics_rmi4_sensor_report(struct synaptics_rmi4_data *rmi4_data)
 static irqreturn_t synaptics_rmi4_irq(int irq, void *data)
 {
 	struct synaptics_rmi4_data *rmi4_data = data;
-	struct synaptics_rmi4_resume_info *tmp_resume_i;
 	struct synaptics_rmi4_irq_info *tmp_q;
 
 	if (rmi4_data->number_irq > 0) {
@@ -2062,13 +2101,6 @@ static irqreturn_t synaptics_rmi4_irq(int irq, void *data)
 		tmp_q =
 			&(rmi4_data->irq_info[rmi4_data->last_irq]);
 		getnstimeofday(&(tmp_q->irq_time));
-	}
-
-	if (rmi4_data->number_resumes > 0) {
-		tmp_resume_i =
-			&(rmi4_data->resume_info[rmi4_data->last_resume]);
-		if (tmp_resume_i->isr.tv_sec == 0)
-			getnstimeofday(&(tmp_resume_i->isr));
 	}
 
 	synaptics_rmi4_sensor_report(rmi4_data);
@@ -2363,6 +2395,13 @@ static int synaptics_rmi4_f12_init(struct synaptics_rmi4_data *rmi4_data,
 	} else
 		return -ENOENT;
 
+	dev_dbg(&rmi4_data->i2c_client->dev,
+			"%s: Function %02x max x = %d max y = %d nof = %d\n",
+			__func__, fhandler->fn_number,
+			rmi4_data->sensor_max_x,
+			rmi4_data->sensor_max_y,
+			rmi4_data->num_of_fingers);
+
 	fhandler->intr_reg_num = (intr_count + 7) / 8;
 	if (fhandler->intr_reg_num != 0)
 		fhandler->intr_reg_num -= 1;
@@ -2403,11 +2442,15 @@ static int synaptics_rmi4_f12_init(struct synaptics_rmi4_data *rmi4_data,
 			ABS_MT_TOUCH_MAJOR, 0,
 			255, 0, 0);
 #endif
+#ifdef TYPE_B_PROTOCOL
+	input_mt_init_slots(rmi4_data->input_dev,
+			rmi4_data->num_of_fingers);
+#else
 	input_set_abs_params(rmi4_data->input_dev,
 			ABS_MT_TRACKING_ID, 0,
 			rmi4_data->num_of_fingers - 1, 0, 0);
-
 	input_set_events_per_packet(rmi4_data->input_dev, 64);
+#endif
 
 	return retval;
 }
@@ -2551,7 +2594,6 @@ static int synaptics_rmi4_alloc_fh(struct synaptics_rmi4_fn **fhandler,
 static int synaptics_rmi4_query_device(struct synaptics_rmi4_data *rmi4_data)
 {
 	int retval;
-	unsigned char *hyphen;
 	unsigned char page_number;
 	unsigned char intr_count = 0;
 	unsigned char data_sources = 0;
@@ -2748,11 +2790,8 @@ static int synaptics_rmi4_query_device(struct synaptics_rmi4_data *rmi4_data)
 	rmi->product_id_string[SYNAPTICS_RMI4_PRODUCT_ID_SIZE] = 0;
 
 	/* handle wrongfully programmed product id strings here */
-	hyphen = strnchr(rmi->product_id_string,
-				SYNAPTICS_RMI4_PRODUCT_ID_SIZE, HYPHEN);
-	if (hyphen != NULL)
-		synaptics_dsx_darn_product_string(
-					rmi->product_id_string, hyphen);
+	synaptics_dsx_darn_product_string(rmi->product_id_string,
+					SYNAPTICS_RMI4_PRODUCT_ID_SIZE);
 
 	retval = synaptics_rmi4_i2c_read(rmi4_data,
 			rmi4_data->f01_query_base_addr+PACKAGE_ID_OFFSET,
@@ -3531,7 +3570,6 @@ static int synaptics_dsx_panel_cb(struct notifier_block *nb,
 {
 	struct fb_event *evdata = data;
 	int *blank;
-	int value = -1;
 	struct synaptics_rmi4_data *rmi4_data =
 		container_of(nb, struct synaptics_rmi4_data, panel_nb);
 
@@ -3539,22 +3577,97 @@ static int synaptics_dsx_panel_cb(struct notifier_block *nb,
 		blank = evdata->data;
 		if (*blank == FB_BLANK_UNBLANK) {
 			synaptics_rmi4_resume(&(rmi4_data->input_dev->dev));
-			value = 0; /* clear flag */
 		} else if (*blank == FB_BLANK_POWERDOWN) {
 			synaptics_rmi4_suspend(&(rmi4_data->input_dev->dev));
-			value = 1; /* set flag */
 		}
-	}
-
-	if (rmi4_data->purge_enabled && value != -1) {
-		atomic_set(&rmi4_data->panel_off_flag, value);
-		pr_debug("touches purge is %s\n", value ? "ON" : "OFF");
 	}
 
 	return 0;
 }
 #endif
 
+static void synaptics_dsx_resumeinfo_start(
+		struct synaptics_rmi4_data *rmi4_data)
+{
+	struct synaptics_rmi4_resume_info *tmp;
+
+	if (rmi4_data->number_resumes > 0) {
+		rmi4_data->last_resume++;
+		if (rmi4_data->last_resume >= rmi4_data->number_resumes)
+			rmi4_data->last_resume = 0;
+
+		tmp = &(rmi4_data->resume_info[rmi4_data->last_resume]);
+		getnstimeofday(&(tmp->start));
+		tmp->ignored_events = 0;
+		tmp->isr.tv_sec = 0;
+		tmp->isr.tv_nsec = 0;
+		tmp->send_touch.tv_sec = 0;
+		tmp->send_touch.tv_nsec = 0;
+		tmp->purge_off.tv_sec = 0;
+		tmp->purge_off.tv_nsec = 0;
+	}
+}
+
+static void synaptics_dsx_resumeinfo_finish(
+		struct synaptics_rmi4_data *rmi4_data)
+{
+	struct synaptics_rmi4_resume_info *tmp;
+
+	if (rmi4_data->number_resumes > 0 && rmi4_data->last_resume >= 0) {
+		tmp = &(rmi4_data->resume_info[rmi4_data->last_resume]);
+		getnstimeofday(&(tmp->finish));
+	}
+}
+
+static void synaptics_dsx_resumeinfo_isr(
+		struct synaptics_rmi4_data *rmi4_data)
+{
+	struct synaptics_rmi4_resume_info *tmp;
+
+	if (rmi4_data->number_resumes > 0 && rmi4_data->last_resume >= 0) {
+		tmp = &(rmi4_data->resume_info[rmi4_data->last_resume]);
+		if (tmp->isr.tv_sec == 0)
+			getnstimeofday(&(tmp->isr));
+	}
+}
+
+static void synaptics_dsx_resumeinfo_purgeoff(
+		struct synaptics_rmi4_data *rmi4_data)
+{
+	struct synaptics_rmi4_resume_info *tmp;
+
+	if (rmi4_data->number_resumes > 0 && rmi4_data->last_resume >= 0) {
+		tmp = &(rmi4_data->resume_info[rmi4_data->last_resume]);
+
+		if (tmp->purge_off.tv_sec == 0)
+			getnstimeofday(&(tmp->purge_off));
+	}
+}
+
+static void synaptics_dsx_resumeinfo_ignore(
+		struct synaptics_rmi4_data *rmi4_data)
+{
+	struct synaptics_rmi4_resume_info *tmp;
+
+	if (rmi4_data->number_resumes > 0 && rmi4_data->last_resume >= 0) {
+		tmp = &(rmi4_data->resume_info[rmi4_data->last_resume]);
+
+		tmp->ignored_events++;
+	}
+}
+
+static void synaptics_dsx_resumeinfo_touch(
+		struct synaptics_rmi4_data *rmi4_data)
+{
+	struct synaptics_rmi4_resume_info *tmp;
+
+	if (rmi4_data->number_resumes > 0 && rmi4_data->last_resume >= 0) {
+		tmp = &(rmi4_data->resume_info[rmi4_data->last_resume]);
+
+		if (tmp->send_touch.tv_sec == 0)
+			getnstimeofday(&(tmp->send_touch));
+	}
+}
  /**
  * synaptics_rmi4_suspend()
  *
@@ -3572,6 +3685,12 @@ static int synaptics_rmi4_suspend(struct device *dev)
 
 	synaptics_dsx_sensor_state(rmi4_data, STATE_SUSPEND);
 	rmi4_data->poweron = false;
+
+	if (rmi4_data->purge_enabled) {
+		int value = 1; /* set flag */
+		atomic_set(&rmi4_data->panel_off_flag, value);
+		pr_debug("touches purge is %s\n", value ? "ON" : "OFF");
+	}
 
 	if (!rmi4_data->touch_stopped) {
 		if (platform_data->regulator_en) {
@@ -3603,11 +3722,14 @@ static int synaptics_rmi4_resume(struct device *dev)
 {
 	struct synaptics_rmi4_data *rmi4_data = dev_get_drvdata(dev);
 
+	synaptics_dsx_resumeinfo_start(rmi4_data);
+
 	if (rmi4_data->touch_stopped) {
 		int retval;
 		bool wait4idle = false;
 		const struct synaptics_dsx_platform_data *platform_data =
 						rmi4_data->board;
+
 		if (platform_data->regulator_en) {
 			regulator_enable(rmi4_data->regulator);
 			pr_debug("touch-vdd regulator is %s\n",
@@ -3643,6 +3765,14 @@ static int synaptics_rmi4_resume(struct device *dev)
 	msleep(100);
 	synaptics_dsx_sensor_ready_state(rmi4_data, false);
 	rmi4_data->poweron = true;
+
+	if (rmi4_data->purge_enabled) {
+		int value = 0; /* clear flag */
+		atomic_set(&rmi4_data->panel_off_flag, value);
+		pr_debug("touches purge is %s\n", value ? "ON" : "OFF");
+	}
+
+	synaptics_dsx_resumeinfo_finish(rmi4_data);
 
 	return 0;
 }

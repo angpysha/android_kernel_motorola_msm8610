@@ -14,7 +14,6 @@
 #include <linux/sched.h>
 #include <linux/device.h>
 #include <linux/fault-inject.h>
-#include <linux/wakelock.h>
 
 #include <linux/mmc/core.h>
 #include <linux/mmc/pm.h>
@@ -343,6 +342,7 @@ struct mmc_host {
 #ifdef CONFIG_MMC_DEBUG
 	unsigned int		removed:1;	/* host is being removed */
 #endif
+	unsigned int		card_bad:1;	/* the card is bad; ignore it */
 
 	int			rescan_disable;	/* disable card detection */
 
@@ -354,8 +354,8 @@ struct mmc_host {
 	int			claim_cnt;	/* "claim" nesting count */
 
 	struct delayed_work	detect;
-	struct wake_lock	detect_wake_lock;
-	const char		*wlock_name;
+	struct wakeup_source	detect_ws;
+	const char		*detect_ws_name;
 	int			detect_change;	/* card detect flag */
 	struct mmc_hotplug	hotplug;
 

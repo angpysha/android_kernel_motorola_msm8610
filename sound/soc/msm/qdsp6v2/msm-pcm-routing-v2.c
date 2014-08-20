@@ -2078,6 +2078,9 @@ static const struct snd_kcontrol_new mmul2_mixer_controls[] = {
 	SOC_SINGLE_EXT("SLIM_0_TX", MSM_BACKEND_DAI_SLIMBUS_0_TX,
 	MSM_FRONTEND_DAI_MULTIMEDIA2, 1, 0, msm_routing_get_audio_mixer,
 	msm_routing_put_audio_mixer),
+	SOC_SINGLE_EXT("PRI_MI2S_TX", MSM_BACKEND_DAI_PRI_MI2S_TX,
+	MSM_FRONTEND_DAI_MULTIMEDIA2, 1, 0, msm_routing_get_audio_mixer,
+	msm_routing_put_audio_mixer),
 };
 
 static const struct snd_kcontrol_new mmul4_mixer_controls[] = {
@@ -2254,6 +2257,27 @@ static const struct snd_kcontrol_new sec_mi2s_rx_voice_mixer_controls[] = {
 	MSM_FRONTEND_DAI_DTMF_RX, 1, 0, msm_routing_get_voice_mixer,
 	msm_routing_put_voice_mixer),
 	SOC_SINGLE_EXT("QCHAT", MSM_BACKEND_DAI_SECONDARY_MI2S_RX,
+	MSM_FRONTEND_DAI_QCHAT, 1, 0, msm_routing_get_voice_mixer,
+	msm_routing_put_voice_mixer),
+};
+
+static const struct snd_kcontrol_new quat_mi2s_rx_voice_mixer_controls[] = {
+	SOC_SINGLE_EXT("CSVoice", MSM_BACKEND_DAI_QUATERNARY_MI2S_RX,
+	MSM_FRONTEND_DAI_CS_VOICE, 1, 0, msm_routing_get_voice_mixer,
+	msm_routing_put_voice_mixer),
+	SOC_SINGLE_EXT("Voice2", MSM_BACKEND_DAI_QUATERNARY_MI2S_RX,
+	MSM_FRONTEND_DAI_VOICE2, 1, 0, msm_routing_get_voice_mixer,
+	msm_routing_put_voice_mixer),
+	SOC_SINGLE_EXT("Voip", MSM_BACKEND_DAI_QUATERNARY_MI2S_RX,
+	MSM_FRONTEND_DAI_VOIP, 1, 0, msm_routing_get_voice_mixer,
+	msm_routing_put_voice_mixer),
+	SOC_SINGLE_EXT("VoLTE", MSM_BACKEND_DAI_QUATERNARY_MI2S_RX,
+	MSM_FRONTEND_DAI_VOLTE, 1, 0, msm_routing_get_voice_mixer,
+	msm_routing_put_voice_mixer),
+	SOC_SINGLE_EXT("DTMF", MSM_BACKEND_DAI_QUATERNARY_MI2S_RX,
+	MSM_FRONTEND_DAI_DTMF_RX, 1, 0, msm_routing_get_voice_mixer,
+	msm_routing_put_voice_mixer),
+	SOC_SINGLE_EXT("QCHAT", MSM_BACKEND_DAI_QUATERNARY_MI2S_RX,
 	MSM_FRONTEND_DAI_QCHAT, 1, 0, msm_routing_get_voice_mixer,
 	msm_routing_put_voice_mixer),
 };
@@ -3533,6 +3557,10 @@ static const struct snd_soc_dapm_widget msm_qdsp6_widgets[] = {
 				SND_SOC_NOPM, 0, 0,
 				sec_mi2s_rx_voice_mixer_controls,
 				ARRAY_SIZE(sec_mi2s_rx_voice_mixer_controls)),
+	SND_SOC_DAPM_MIXER("QUAT_MI2S_RX_Voice Mixer",
+				SND_SOC_NOPM, 0, 0,
+				quat_mi2s_rx_voice_mixer_controls,
+			ARRAY_SIZE(quat_mi2s_rx_voice_mixer_controls)),
 	SND_SOC_DAPM_MIXER("SLIM_0_RX_Voice Mixer",
 				SND_SOC_NOPM, 0, 0,
 				slimbus_rx_voice_mixer_controls,
@@ -3783,6 +3811,7 @@ static const struct snd_soc_dapm_route intercon[] = {
 	{"MultiMedia1 Mixer", "SEC_MI2S_TX", "SEC_MI2S_TX"},
 	{"MultiMedia1 Mixer", "PRI_MI2S_TX", "PRI_MI2S_TX"},
 	{"MultiMedia6 Mixer", "SLIM_0_TX", "SLIMBUS_0_TX"},
+	{"MultiMedia2 Mixer", "PRI_MI2S_TX", "PRI_MI2S_TX"},
 
 	{"INTERNAL_BT_SCO_RX Audio Mixer", "MultiMedia1", "MM_DL1"},
 	{"INTERNAL_BT_SCO_RX Audio Mixer", "MultiMedia2", "MM_DL2"},
@@ -3904,6 +3933,14 @@ static const struct snd_soc_dapm_route intercon[] = {
 	{"SEC_MI2S_RX_Voice Mixer", "DTMF", "DTMF_DL_HL"},
 	{"SEC_MI2S_RX_Voice Mixer", "QCHAT", "QCHAT_DL"},
 	{"SEC_MI2S_RX", NULL, "SEC_MI2S_RX_Voice Mixer"},
+
+	{"QUAT_MI2S_RX_Voice Mixer", "CSVoice", "CS-VOICE_DL1"},
+	{"QUAT_MI2S_RX_Voice Mixer", "Voice2", "VOICE2_DL"},
+	{"QUAT_MI2S_RX_Voice Mixer", "VoLTE", "VoLTE_DL"},
+	{"QUAT_MI2S_RX_Voice Mixer", "Voip", "VOIP_DL"},
+	{"QUAT_MI2S_RX_Voice Mixer", "DTMF", "DTMF_DL_HL"},
+	{"QUAT_MI2S_RX_Voice Mixer", "QCHAT", "QCHAT_DL"},
+	{"QUAT_MI2S_RX", NULL, "QUAT_MI2S_RX_Voice Mixer"},
 
 	{"SLIM_0_RX_Voice Mixer", "CSVoice", "CS-VOICE_DL1"},
 	{"SLIM_0_RX_Voice Mixer", "Voice2", "VOICE2_DL"},
@@ -4296,86 +4333,6 @@ static const struct snd_soc_dapm_route intercon[] = {
 	{"SLIMBUS_0_RX", NULL, "SLIM0_RX_VI_FB_LCH_MUX"},
 };
 
-#if defined(CONFIG_SND_SOC_WM5110) && defined(CONFIG_SND_SOC_TFA9890)
-static int tfa9890_wm5110_active;
-
-static int msm_tfa9890_routing_get(struct snd_kcontrol *kcontrol,
-				struct snd_ctl_elem_value *ucontrol)
-{
-	ucontrol->value.integer.value[0] = tfa9890_wm5110_active;
-
-	return 0;
-}
-
-static int msm_tfa9890_routing_put(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_dapm_widget_list *wlist = snd_kcontrol_chip(kcontrol);
-	struct snd_soc_dapm_widget *widget = wlist->widgets[0];
-
-	if (ucontrol->value.integer.value[0])
-		snd_soc_dapm_mixer_update_power(widget, kcontrol, 1);
-	else
-		snd_soc_dapm_mixer_update_power(widget, kcontrol, 0);
-
-	tfa9890_wm5110_active = ucontrol->value.integer.value[0];
-
-	return 1;
-}
-
-static const struct snd_kcontrol_new tfa9890_rx_mixer_controls[] = {
-	SOC_SINGLE_EXT("TFA9890_LEFT", 0,
-		0, 1, 0, msm_tfa9890_routing_get, msm_tfa9890_routing_put),
-	SOC_SINGLE_EXT("TFA9890_RIGHT", 0,
-		0, 1, 0, msm_tfa9890_routing_get, msm_tfa9890_routing_put),
-};
-
-/* platform widgets to help with tfa9890<->wm5110 (codec-codec) linking
- * and to trigger tfa9890 BE DAI, when playback streams are started.
-*/
-static const struct snd_soc_dapm_widget msm8974_wm5110_tfa9890_widgets[] = {
-	SND_SOC_DAPM_AIF_OUT("TFA9890_WM5110_RXL",
-			"codec-codec link left Playback",
-			0, 0, 0, 0),
-	SND_SOC_DAPM_AIF_OUT("TFA9890_WM5110_RXR",
-			"codec-codec link right Playback",
-			0, 0, 0, 0),
-	SND_SOC_DAPM_MIXER("TFA9890_WM5110_RX Mixer", SND_SOC_NOPM, 0, 0,
-			tfa9890_rx_mixer_controls,
-			ARRAY_SIZE(tfa9890_rx_mixer_controls)),
-};
-
-static const struct snd_soc_dapm_route wm5110_tfa9890_routes[] = {
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_LEFT", "MM_DL1"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_LEFT", "MM_DL2"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_LEFT", "MM_DL3"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_LEFT", "MM_DL4"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_LEFT", "MM_DL5"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_LEFT", "MM_DL6"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_LEFT", "MM_DL7"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_LEFT", "MM_DL8"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_LEFT", "VOIP_DL"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_LEFT", "CS-VOICE_DL1"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_LEFT", "VOICE2_DL"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_LEFT", "VoLTE_DL"},
-	{ "TFA9890_WM5110_RXL", NULL, "TFA9890_WM5110_RX Mixer"},
-
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_RIGHT", "MM_DL1"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_RIGHT", "MM_DL2"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_RIGHT", "MM_DL3"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_RIGHT", "MM_DL4"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_RIGHT", "MM_DL5"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_RIGHT", "MM_DL6"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_RIGHT", "MM_DL7"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_RIGHT", "MM_DL8"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_RIGHT", "VOIP_DL"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_RIGHT", "CS-VOICE_DL1"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_RIGHT", "VOICE2_DL"},
-	{ "TFA9890_WM5110_RX Mixer", "TFA9890_RIGHT", "VoLTE_DL"},
-	{ "TFA9890_WM5110_RXR", NULL, "TFA9890_WM5110_RX Mixer"},
-};
-#endif
-
 static int msm_pcm_routing_hw_params(struct snd_pcm_substream *substream,
 				struct snd_pcm_hw_params *params)
 {
@@ -4568,16 +4525,6 @@ static int msm_routing_probe(struct snd_soc_platform *platform)
 			   ARRAY_SIZE(msm_qdsp6_widgets));
 	snd_soc_dapm_add_routes(&platform->dapm, intercon,
 		ARRAY_SIZE(intercon));
-
-#if defined(CONFIG_SND_SOC_WM5110) && defined(CONFIG_SND_SOC_TFA9890)
-	snd_soc_dapm_new_controls(&platform->dapm,
-				msm8974_wm5110_tfa9890_widgets,
-				ARRAY_SIZE(msm8974_wm5110_tfa9890_widgets));
-
-	snd_soc_dapm_add_routes(&platform->dapm,
-				wm5110_tfa9890_routes,
-				ARRAY_SIZE(wm5110_tfa9890_routes));
-#endif
 
 	snd_soc_dapm_new_widgets(&platform->dapm);
 

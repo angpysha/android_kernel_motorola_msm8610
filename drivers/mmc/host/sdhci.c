@@ -1071,7 +1071,7 @@ static void sdhci_finish_data(struct sdhci_host *host)
 		tasklet_schedule(&host->finish_tasklet);
 }
 
-#define SDHCI_REQUEST_TIMEOUT	10 /* Default request timeout in seconds */
+#define SDHCI_REQUEST_TIMEOUT	8 /* Default request timeout in seconds */
 
 static void sdhci_send_command(struct sdhci_host *host, struct mmc_command *cmd)
 {
@@ -1106,11 +1106,26 @@ static void sdhci_send_command(struct sdhci_host *host, struct mmc_command *cmd)
 		mdelay(1);
 	}
 
-	mod_timer(&host->timer, jiffies + SDHCI_REQUEST_TIMEOUT * HZ);
+	/*
+	 * Set the controller catch-all timer to:
+	 *  - 20s for quirky cards
+	 * otherwise:
+	 *  - 500ms for CMD13
+	 *  - 8s for everything else
+	 */
+	if ((host->mmc->card) && (host->mmc->card->quirks & MMC_QUIRK_INAND_DATA_TIMEOUT))
+		timeout = 20000;
+	else {
+		if (cmd->opcode == MMC_SEND_STATUS)
+			timeout = 500;
+		else
+			timeout = SDHCI_REQUEST_TIMEOUT * MSEC_PER_SEC;
+	}
 
-	if (cmd->cmd_timeout_ms > SDHCI_REQUEST_TIMEOUT * MSEC_PER_SEC)
-		mod_timer(&host->timer, jiffies +
-				(msecs_to_jiffies(cmd->cmd_timeout_ms * 2)));
+	if (timeout < cmd->cmd_timeout_ms * 2)
+		timeout = cmd->cmd_timeout_ms * 2;
+
+	mod_timer(&host->timer, jiffies + msecs_to_jiffies(timeout));
 
 	host->cmd = cmd;
 
@@ -2015,6 +2030,8 @@ static int sdhci_do_start_signal_voltage_switch(struct sdhci_host *host,
 		 * failed. We power cycle the card, and retry initialization
 		 * sequence by setting S18R to 0.
 		 */
+		pr_info(DRIVER_NAME ": Switching to 1.8V signalling "
+			"voltage failed, retrying with S18R set to 0\n");
 		pwr = sdhci_readb(host, SDHCI_POWER_CONTROL);
 		pwr &= ~SDHCI_POWER_ON;
 		sdhci_writeb(host, pwr, SDHCI_POWER_CONTROL);
@@ -2023,13 +2040,15 @@ static int sdhci_do_start_signal_voltage_switch(struct sdhci_host *host,
 
 		/* Wait for 1ms as per the spec */
 		usleep_range(1000, 1500);
+
+		if (host->ops->hw_reset)
+			host->ops->hw_reset(host);
+
 		pwr |= SDHCI_POWER_ON;
 		sdhci_writeb(host, pwr, SDHCI_POWER_CONTROL);
 		if (host->ops->check_power_status)
 			host->ops->check_power_status(host, REQ_BUS_ON);
 
-		pr_info(DRIVER_NAME ": Switching to 1.8V signalling "
-			"voltage failed, retrying with S18R set to 0\n");
 		return -EAGAIN;
 	} else
 		/* No signal voltage switch required */

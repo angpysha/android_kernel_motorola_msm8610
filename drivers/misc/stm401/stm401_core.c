@@ -18,7 +18,6 @@
 
 #include <linux/cdev.h>
 #include <linux/delay.h>
-#include <linux/earlysuspend.h>
 #include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/export.h>
@@ -34,6 +33,7 @@
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/poll.h>
+#include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/switch.h>
@@ -68,13 +68,17 @@ unsigned short stm401_g_acc_delay;
 unsigned short stm401_g_mag_delay;
 unsigned short stm401_g_gyro_delay;
 unsigned short stm401_g_baro_delay;
-unsigned short stm401_g_nonwake_sensor_state;
+unsigned short stm401_g_step_counter_delay;
+unsigned long stm401_g_nonwake_sensor_state;
 unsigned short stm401_g_wake_sensor_state;
 unsigned short stm401_g_algo_state;
 unsigned char stm401_g_motion_dur;
 unsigned char stm401_g_zmotion_dur;
 unsigned char stm401_g_control_reg[STM401_CONTROL_REG_SIZE];
 unsigned char stm401_g_mag_cal[STM401_MAG_CAL_SIZE];
+unsigned short stm401_g_control_reg_restore;
+unsigned char stm401_g_ir_config_reg[STM401_IR_CONFIG_REG_SIZE];
+bool stm401_g_ir_config_reg_restore;
 
 /* Store error message */
 unsigned char stat_string[ESR_SIZE+1];
@@ -101,11 +105,6 @@ const struct stm401_algo_info_t stm401_algo_info[STM401_NUM_ALGOS] = {
 
 struct stm401_data *stm401_misc_data;
 
-#ifdef CONFIG_HAS_EARLYSUSPEND
-static void stm401_early_suspend(struct early_suspend *handler);
-static void stm401_late_resume(struct early_suspend *handler);
-#endif
-
 int stm401_i2c_write_read_no_reset(struct stm401_data *ps_stm401,
 			u8 *buf, int writelen, int readlen)
 {
@@ -131,7 +130,7 @@ int stm401_i2c_write_read_no_reset(struct stm401_data *ps_stm401,
 	do {
 		err = i2c_transfer(ps_stm401->client->adapter, msgs, 2);
 		if (err != 2)
-			msleep_interruptible(stm401_i2c_retry_delay);
+			msleep(stm401_i2c_retry_delay);
 	} while ((err != 2) && (++tries < I2C_RETRIES));
 	if (err != 2) {
 		dev_err(&ps_stm401->client->dev, "Read transfer error\n");
@@ -162,7 +161,7 @@ int stm401_i2c_read_no_reset(struct stm401_data *ps_stm401,
 	do {
 		err = i2c_master_recv(ps_stm401->client, buf, len);
 		if (err < 0)
-			msleep_interruptible(stm401_i2c_retry_delay);
+			msleep(stm401_i2c_retry_delay);
 	} while ((err < 0) && (++tries < I2C_RETRIES));
 	if (err < 0) {
 		dev_err(&ps_stm401->client->dev, "i2c read transfer error\n");
@@ -186,11 +185,10 @@ int stm401_i2c_write_no_reset(struct stm401_data *ps_stm401,
 	int err = 0;
 	int tries = 0;
 
-	tries = 0;
 	do {
 		err = i2c_master_send(ps_stm401->client, buf, len);
 		if (err < 0)
-			msleep_interruptible(stm401_i2c_retry_delay);
+			msleep(stm401_i2c_retry_delay);
 	} while ((err < 0) && (++tries < I2C_RETRIES));
 
 	if (err < 0) {
@@ -794,13 +792,6 @@ static int stm401_probe(struct i2c_client *client,
 		}
 	}
 
-#ifdef CONFIG_HAS_EARLYSUSPEND
-	ps_stm401->early_suspend.level = EARLY_SUSPEND_LEVEL_DISABLE_FB + 1;
-	ps_stm401->early_suspend.suspend = stm401_early_suspend;
-	ps_stm401->early_suspend.resume = stm401_late_resume;
-	register_early_suspend(&ps_stm401->early_suspend);
-#endif
-
 	init_waitqueue_head(&ps_stm401->stm401_as_data_wq);
 	init_waitqueue_head(&ps_stm401->stm401_ms_data_wq);
 
@@ -833,7 +824,8 @@ static int stm401_probe(struct i2c_client *client,
 	}
 	input_set_drvdata(ps_stm401->input_dev, ps_stm401);
 	input_set_capability(ps_stm401->input_dev, EV_KEY, KEY_POWER);
-	ps_stm401->input_dev->name = "stm401sensorprocessor";
+	input_set_capability(ps_stm401->input_dev, EV_KEY, KEY_CAMERA);
+	ps_stm401->input_dev->name = "sensorprocessor";
 
 	err = input_register_device(ps_stm401->input_dev);
 	if (err) {
@@ -842,6 +834,8 @@ static int stm401_probe(struct i2c_client *client,
 			ps_stm401->input_dev->name, err);
 		goto err9;
 	}
+
+	pm_runtime_enable(&client->dev);
 
 	switch_stm401_mode(NORMALMODE);
 
@@ -902,9 +896,7 @@ static int stm401_remove(struct i2c_client *client)
 	wake_unlock(&ps_stm401->wakelock);
 	wake_lock_destroy(&ps_stm401->wakelock);
 	disable_irq_wake(ps_stm401->irq);
-#ifdef CONFIG_HAS_EARLYSUSPEND
-	unregister_early_suspend(&ps_stm401->early_suspend);
-#endif
+
 	regulator_disable(ps_stm401->regulator_2);
 	regulator_disable(ps_stm401->regulator_1);
 	regulator_put(ps_stm401->regulator_2);
@@ -914,14 +906,17 @@ static int stm401_remove(struct i2c_client *client)
 	return 0;
 }
 
-static int stm401_resume(struct i2c_client *client)
+static int stm401_resume(struct device *dev)
 {
+	struct i2c_client *client = to_i2c_client(dev);
 	struct stm401_data *ps_stm401 = i2c_get_clientdata(client);
 	int count = 0, level = 0;
 	int stm401_req = ps_stm401->pdata->gpio_mipi_req;
 	int stm401_busy = ps_stm401->pdata->gpio_mipi_busy;
 	dev_dbg(&stm401_misc_data->client->dev, "stm401_resume\n");
 	mutex_lock(&ps_stm401->lock);
+
+	ps_stm401->is_suspended = false;
 
 	if ((ps_stm401->ap_stm401_handoff_enable)
 		&& (ps_stm401->ap_stm401_handoff_ctrl)) {
@@ -954,14 +949,18 @@ static int stm401_resume(struct i2c_client *client)
 	return 0;
 }
 
-static int stm401_suspend(struct i2c_client *client, pm_message_t mesg)
+static int stm401_suspend(struct device *dev)
 {
+	struct i2c_client *client = to_i2c_client(dev);
 	struct stm401_data *ps_stm401 = i2c_get_clientdata(client);
 	int count = 0, level = 0;
 	int stm401_req = ps_stm401->pdata->gpio_mipi_req;
 	int stm401_busy = ps_stm401->pdata->gpio_mipi_busy;
+
 	dev_dbg(&ps_stm401->client->dev, "stm401_suspend\n");
 	mutex_lock(&ps_stm401->lock);
+
+	ps_stm401->is_suspended = true;
 
 	if ((ps_stm401->ap_stm401_handoff_enable)
 		 && (ps_stm401->ap_stm401_handoff_ctrl)) {
@@ -986,23 +985,31 @@ static int stm401_suspend(struct i2c_client *client, pm_message_t mesg)
 	return 0;
 }
 
-#ifdef CONFIG_HAS_EARLYSUSPEND
-static void stm401_early_suspend(struct early_suspend *handler)
+#ifdef CONFIG_PM_RUNTIME
+static int stm401_runtime_resume(struct device *dev)
 {
-	struct stm401_data *ps_stm401;
-
-	ps_stm401 = container_of(handler, struct stm401_data, early_suspend);
-	stm401_suspend(ps_stm401->client, PMSG_SUSPEND);
+	struct i2c_client *client = to_i2c_client(dev);
+	struct stm401_data *ps_stm401 = i2c_get_clientdata(client);
+	dev_err(&ps_stm401->client->dev, "stm401_runtime_resume\n");
+	return stm401_resume(dev);
 }
 
-static void stm401_late_resume(struct early_suspend *handler)
+static int stm401_runtime_suspend(struct device *dev)
 {
-	struct stm401_data *ps_stm401;
-
-	ps_stm401 = container_of(handler, struct stm401_data, early_suspend);
-	stm401_resume(ps_stm401->client);
+	struct i2c_client *client = to_i2c_client(dev);
+	struct stm401_data *ps_stm401 = i2c_get_clientdata(client);
+	dev_err(&ps_stm401->client->dev, "stm401_runtime_suspend\n");
+	return stm401_suspend(dev);
 }
 #endif
+
+static const struct dev_pm_ops stm401_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(stm401_suspend,
+						stm401_resume)
+	SET_RUNTIME_PM_OPS(stm401_runtime_suspend,
+						stm401_runtime_resume,
+						NULL)
+};
 
 static const struct i2c_device_id stm401_id[] = {
 	{NAME, 0},
@@ -1024,13 +1031,12 @@ static struct i2c_driver stm401_driver = {
 		   .name = NAME,
 		   .owner = THIS_MODULE,
 		   .of_match_table = of_match_ptr(stm401_match_tbl),
-		   },
+#ifdef CONFIG_PM
+		   .pm = &stm401_pm_ops,
+#endif
+	},
 	.probe = stm401_probe,
 	.remove = stm401_remove,
-#ifndef CONFIG_HAS_EARLYSUSPEND
-	.resume = stm401_resume,
-	.suspend = stm401_suspend,
-#endif
 	.id_table = stm401_id,
 };
 

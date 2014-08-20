@@ -1778,11 +1778,11 @@ static void dwc3_chg_detect_work(struct work_struct *w)
 			dwc3_msm_write_readback(mdwc->base,
 					CHARGING_DET_CTRL_REG, 0x1F, 0x10);
 			if (mdwc->ext_chg_opened) {
-				init_completion(&mdwc->ext_chg_wait);
+				complete(&mdwc->ext_chg_wait);
 				mdwc->ext_chg_active = true;
 			}
 		}
-		dev_dbg(mdwc->dev, "chg_type = %s\n",
+		dev_info(mdwc->dev, "chg_type = %s\n",
 			chg_to_string(mdwc->charger.chg_type));
 		mdwc->charger.notify_detection_complete(mdwc->otg_xceiv->otg,
 								&mdwc->charger);

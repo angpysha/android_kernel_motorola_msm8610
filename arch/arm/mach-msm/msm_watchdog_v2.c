@@ -34,6 +34,7 @@
 #include <asm/bootinfo.h>
 #include <asm/stacktrace.h>
 #include <asm/traps.h>
+#include <asm/sections.h>
 #include <mach/socinfo.h>
 #endif
 
@@ -49,6 +50,9 @@
 #define MASK_SIZE		32
 #define SCM_SET_REGSAVE_CMD	0x2
 #define SCM_SVC_SEC_WDOG_DIS	0x7
+
+#define SCM_SVC_OEM		0xfe
+#define SCM_OEM_GET_CORE_COUNT	0xfff0
 
 static struct workqueue_struct *wdog_wq;
 static struct msm_watchdog_data *g_wdog_dd;
@@ -128,6 +132,24 @@ static int msm_watchdog_resume(struct device *dev)
 	return 0;
 }
 
+void msm_panic_wdt_set(unsigned int timeout)
+{
+	unsigned long flags;
+	void __iomem *msm_wdt_base;
+
+	local_irq_save(flags);
+
+	if (timeout > 60)
+		timeout = 60;
+
+	msm_wdt_base = g_wdog_dd->base;
+	__raw_writel(WDT_HZ * timeout, msm_wdt_base + WDT0_BARK_TIME);
+	__raw_writel(WDT_HZ * (timeout + 2), msm_wdt_base + WDT0_BITE_TIME);
+	__raw_writel(1, msm_wdt_base + WDT0_EN);
+	__raw_writel(1, msm_wdt_base + WDT0_RST);
+
+	local_irq_restore(flags);
+}
 void msm_watchdog_reset(unsigned int timeout)
 {
 	unsigned long flags;
@@ -334,6 +356,12 @@ static void pet_watchdog_work(struct work_struct *work)
 	struct msm_watchdog_data *wdog_dd = container_of(delayed_work,
 						struct msm_watchdog_data,
 							dogwork_struct);
+
+	if (test_taint(TAINT_DIE) || oops_in_progress) {
+		pr_info("MSM Watchdog Skip Pet Work.\n");
+		return;
+	}
+
 	delay_time = msecs_to_jiffies(wdog_dd->pet_time);
 	if (enable) {
 		if (wdog_dd->do_ipi_ping)
@@ -415,9 +443,12 @@ static irqreturn_t wdog_ppi_bark(int irq, void *dev_id)
 #define TZBSP_SC_STATUS_WDT		0x02
 #define TZBSP_SC_STATUS_SGI		0x04
 #define TZBSP_SC_STATUS_WARM_BOOT	0x08
+#define TZBSP_SC_STATUS_DBI		0x10
 
 #define TZBSP_DUMP_CTX_MAGIC		0x44434151
-#define TZBSP_DUMP_CTX_VERSION		2
+#define TZBSP_DUMP_CTX_VERSION2		2
+#define TZBSP_DUMP_CTX_VERSION3		3
+#define TZBSP_DUMP_CTX_VERSION4		4
 
 #define MSM_WDT_CTX_SIG			0x77647473
 #define MSM_WDT_CTX_REV			0x00010003
@@ -482,6 +513,37 @@ struct tzbsp_cpu_ctx_s {
 	u32 wdog_pc;
 };
 
+struct tzbsp_neon_regs_s {
+	u64 d[32];
+};
+
+struct tzbsp_neon_cpu_ctx_s {
+	u32 fpsid;
+	u32 fpscr;
+	u32 fpexc;
+	u32 hole1;
+	struct tzbsp_neon_regs_s regs;
+};
+
+#define ARM_MAX_BPS_WPS 16
+
+struct tzbsp_dbg_bpt_s {
+	u32 bpt_value;
+	u32 bpt_control;
+};
+
+struct tzbsp_dbg_wpt_s {
+	u32 wpt_value;
+	u32 wpt_control;
+};
+
+struct tzbsp_dbg_cpu_ctx_s {
+	u32 dbgdidr;
+	u32 dbgscr;
+	struct tzbsp_dbg_bpt_s breakpoints[ARM_MAX_BPS_WPS];
+	struct tzbsp_dbg_wpt_s watchpoints[ARM_MAX_BPS_WPS];
+};
+
 /* Structure of the entire non-secure context dump buffer. Because TZ is single
  * entry only a single secure context is saved. */
 struct tzbsp_dump_buf_s0 {
@@ -490,7 +552,7 @@ struct tzbsp_dump_buf_s0 {
 	u32 cpu_count;
 };
 
-struct tzbsp_dump_buf_s2 {
+struct tzbsp_dump_buf_s2_v2 {
 	u32 magic;
 	u32 version;
 	u32 cpu_count;
@@ -500,7 +562,14 @@ struct tzbsp_dump_buf_s2 {
 	u32 wdt_sts[NR_CPUS_2];
 };
 
-struct tzbsp_dump_buf_s4 {
+struct tzbsp_dump_buf_s2_v4 {
+	struct tzbsp_dump_buf_s2_v2 v2;
+	u32 cpacr[NR_CPUS_2];
+	struct tzbsp_neon_cpu_ctx_s neon[NR_CPUS_2];
+	struct tzbsp_dbg_cpu_ctx_s dbg[NR_CPUS_2];
+};
+
+struct tzbsp_dump_buf_s4_v2 {
 	u32 magic;
 	u32 version;
 	u32 cpu_count;
@@ -510,10 +579,19 @@ struct tzbsp_dump_buf_s4 {
 	u32 wdt_sts[NR_CPUS_4];
 };
 
+struct tzbsp_dump_buf_s4_v4 {
+	struct tzbsp_dump_buf_s4_v2 v2;
+	u32 cpacr[NR_CPUS_4];
+	struct tzbsp_neon_cpu_ctx_s neon[NR_CPUS_4];
+	struct tzbsp_dbg_cpu_ctx_s dbg[NR_CPUS_4];
+};
+
 union tzbsp_dump_buf_s {
 	struct tzbsp_dump_buf_s0 s0;
-	struct tzbsp_dump_buf_s2 s2;
-	struct tzbsp_dump_buf_s4 s4;
+	struct tzbsp_dump_buf_s2_v2 s2v2;
+	struct tzbsp_dump_buf_s2_v4 s2v4;
+	struct tzbsp_dump_buf_s4_v2 s4v2;
+	struct tzbsp_dump_buf_s4_v4 s4v4;
 };
 
 struct msm_wdt_lnx_info {
@@ -532,9 +610,18 @@ struct msm_wdt_ctx_info {
 	u32 sig;
 } __packed __aligned(4);
 
+struct scm_buf {
+	u32 mot_cmd;
+	u32 ret_addr_phys;
+	u32 ret;
+	u32 unused;
+};
+
 struct msm_wdt_page1 {
 	union tzbsp_dump_buf_s tzbsp;
+	struct scm_buf scm_buf;
 	u8 spare[PAGE_SIZE - sizeof(union tzbsp_dump_buf_s)
+			- sizeof(struct scm_buf)
 			- sizeof(struct msm_wdt_ctx_info)];
 	struct msm_wdt_ctx_info cinfo;
 } __packed __aligned(PAGE_SIZE);
@@ -593,15 +680,21 @@ static void msm_wdt_show_status(u32 sc_status, const char *label)
 		MSMWDTD("%s: probably didn't finish dump.\n", label);
 		return;
 	}
-	MSMWDTD("%s: was in %ssecure world.\n", label,
-		(sc_status & TZBSP_SC_STATUS_NS_BIT) ? "non-" : "");
-	if (sc_status & TZBSP_SC_STATUS_WDT)
-		MSMWDTD("%s: experienced a watchdog timeout.\n", label);
-	if (sc_status & TZBSP_SC_STATUS_SGI)
-		MSMWDTD("%s: some other core experienced a watchdog timeout.\n",
-			label);
-	if (sc_status & TZBSP_SC_STATUS_WARM_BOOT)
-		MSMWDTD("%s: WDT bark occured during TZ warm boot.\n", label);
+	MSMWDTD("%s: ", label);
+	if (sc_status & TZBSP_SC_STATUS_DBI) {
+		MSMWDTD("SDI: Secure watchdog bite. ");
+	} else {
+		MSMWDTD("TZ: Non-secure watchdog bite. ");
+		MSMWDTD("%sS ", (sc_status & TZBSP_SC_STATUS_NS_BIT) ?
+				"N" : "");
+		if (sc_status & TZBSP_SC_STATUS_WDT)
+			MSMWDTD("WDT ");
+		if (sc_status & TZBSP_SC_STATUS_SGI)
+			MSMWDTD("SGI ");
+		if (sc_status & TZBSP_SC_STATUS_WARM_BOOT)
+			MSMWDTD("WARM_BOOT ");
+	}
+	MSMWDTD("\n");
 }
 
 static const char stat_nam[] = TASK_STATE_TO_CHAR_STR;
@@ -621,10 +714,19 @@ static void msm_wdt_show_task(struct task_struct *p,
 			(unsigned long)ti->flags);
 }
 
-static void msm_wdt_show_regs(struct tzbsp_mon_cpu_ctx_s *regs,
+static void msm_wdt_show_regs(struct tzbsp_cpu_ctx_s *cpu_ctx, int sec,
 				const char *label)
 {
+	struct tzbsp_mon_cpu_ctx_s *regs = &cpu_ctx->saved_ctx;
 	MSMWDTD("%s\n", label);
+	if (!sec) {
+		if ((cpu_ctx->wdog_pc >= (u32)_stext) &&
+				(cpu_ctx->wdog_pc <= (u32)_etext))
+			MSMWDTD("PC is at %pS <%08x>\n",
+				(void *)cpu_ctx->wdog_pc, cpu_ctx->wdog_pc);
+		else
+			MSMWDTD("PC is at %08x\n", cpu_ctx->wdog_pc);
+	}
 	MSMWDTD("\tr12: %08x  r11: %08x  r10: %08x  r9 : %08x  r8 : %08x\n",
 			regs->usr_r12, regs->usr_r11, regs->usr_r10,
 			regs->usr_r9, regs->usr_r8);
@@ -634,7 +736,11 @@ static void msm_wdt_show_regs(struct tzbsp_mon_cpu_ctx_s *regs,
 	MSMWDTD("\tr3 : %08x  r2 : %08x  r1 : %08x  r0 : %08x\n",
 			regs->usr_r3, regs->usr_r2, regs->usr_r1,
 			regs->usr_r0);
-	MSMWDTD("MON:\tlr : %08x  spsr: %08x\n",
+	if (!sec)
+		MSMWDTD("MON:\tlr : %08x  sp : %08x  spsr : %08x\n",
+			regs->mon_lr, cpu_ctx->mon_sp, regs->mon_spsr);
+	else
+		MSMWDTD("MON:\tlr : %08x  spsr: %08x\n",
 			regs->mon_lr, regs->mon_spsr);
 	MSMWDTD("SVC:\tlr : %08x  sp : %08x  spsr : %08x\n",
 			regs->svc_r14, regs->svc_r13, regs->svc_spsr);
@@ -737,63 +843,105 @@ static void msm_wdt_unwind_backtrace(struct tzbsp_mon_cpu_ctx_s *regs,
 	}
 }
 
-static void msm_wdt_ctx_print(struct msm_wdt_ctx *ctx)
+static int get_tzbsp_core_count(struct scm_buf *scm_buf, unsigned long phys)
 {
-	int i;
-	unsigned long stack_tmp = 0, orr = 0;
+	int ret = get_core_count();
+
+	if (cpu_is_msm8610()) {
+		scm_buf->mot_cmd = SCM_OEM_GET_CORE_COUNT;
+		scm_buf->ret_addr_phys = phys + offsetof(struct scm_buf, ret);
+		if (!scm_call(SCM_SVC_OEM, 1, scm_buf,
+				sizeof(*scm_buf), NULL, 0)) {
+			ret = scm_buf->ret;
+		} else {
+			pr_err("Failed to get tzbsp cpu count for msm8610.\n");
+			ret = -EINVAL;
+		}
+	}
+	return ret;
+}
+
+static int msm_wdt_tzbsp_ctx_header_check(struct msm_wdt_ctx *ctx,
+						unsigned long phys)
+{
+	const int cpu_count = get_core_count();
+	int tzbsp_cpu_count;
+	struct tzbsp_dump_buf_s0 *tzctx = &ctx->p1.tzbsp.s0;
+
+	if (tzctx->magic != TZBSP_DUMP_CTX_MAGIC)
+		goto tzbsp_ctx_invalid;
+
+	switch (tzctx->version) {
+	case TZBSP_DUMP_CTX_VERSION2:
+	case TZBSP_DUMP_CTX_VERSION3:
+	case TZBSP_DUMP_CTX_VERSION4:
+		break;
+	default:
+		goto tzbsp_ctx_invalid;
+	}
+
+	tzbsp_cpu_count = get_tzbsp_core_count(&ctx->p1.scm_buf,
+			phys + offsetof(struct msm_wdt_ctx, p1.scm_buf));
+
+	if (tzbsp_cpu_count < 0) {
+		if ((tzctx->cpu_count != cpu_count) &&
+				(tzctx->cpu_count > NR_CPUS_MAX))
+			goto tzbsp_ctx_invalid;
+	} else if ((tzctx->cpu_count != tzbsp_cpu_count)) {
+		goto tzbsp_ctx_invalid;
+	}
+	return 0;
+
+tzbsp_ctx_invalid:
+	if (bi_powerup_reason() == PU_REASON_WDOG_AP_RESET) {
+		struct tzbsp_dump_buf_s0 *start = &ctx->p1.tzbsp.s0 + 1;
+		union tzbsp_dump_buf_s *end = &ctx->p1.tzbsp + 1;
+		u32 *tmp;
+
+		MSMWDTD("msm_wdt_ctx: tzbsp dump buffer mismatch.\n");
+		MSMWDTD("Expected: magic 0x%08x, cpu_count %d, ",
+			TZBSP_DUMP_CTX_MAGIC, (tzbsp_cpu_count < 0) ?
+			cpu_count : tzbsp_cpu_count);
+		MSMWDTD("version %d, %d, or %d\n", TZBSP_DUMP_CTX_VERSION2,
+			TZBSP_DUMP_CTX_VERSION3, TZBSP_DUMP_CTX_VERSION4);
+		MSMWDTD("Found:    magic 0x%08x, cpu_count %d, version %d\n",
+			tzctx->magic, tzctx->cpu_count, tzctx->version);
+
+		for (tmp = (u32 *)start; tmp < (u32 *)end; tmp++)
+			if (*tmp)
+				break;
+		if (tmp >= (u32 *)end)
+			MSMWDTD("\n*** Might be Secure watchdog bite ***\n\n");
+		else
+			MSMWDTD("*** Likely Bad Dump ***\n");
+	}
+	return -EINVAL;
+}
+
+static void msm_wdt_tzbsp_ctx_dump(struct msm_wdt_ctx *ctx)
+{
 	u32 *sc_status, *wdt_sts;
 	struct tzbsp_cpu_ctx_s *sc_ns;
 	char label[64];
-	u8 (*stack)[THREAD_SIZE];
+	const int tzctx_cpu_count = ctx->p1.tzbsp.s0.cpu_count;
 	const int cpu_count = get_core_count();
-	struct msm_wdt_pcp *pcp;
-	struct task_struct *task;
+	int i;
 
-	switch (cpu_count) {
+	switch (tzctx_cpu_count) {
 	case NR_CPUS_2:
-		sc_status = ctx->p1.tzbsp.s2.sc_status;
-		sc_ns = ctx->p1.tzbsp.s2.sc_ns;
-		wdt_sts = ctx->p1.tzbsp.s2.wdt_sts;
+		/* Common for v2, v3 and v4. */
+		sc_status = ctx->p1.tzbsp.s2v2.sc_status;
+		sc_ns = ctx->p1.tzbsp.s2v2.sc_ns;
+		wdt_sts = ctx->p1.tzbsp.s2v2.wdt_sts;
 		break;
 	case NR_CPUS_4:
-		sc_status = ctx->p1.tzbsp.s4.sc_status;
-		sc_ns = ctx->p1.tzbsp.s4.sc_ns;
-		wdt_sts = ctx->p1.tzbsp.s4.wdt_sts;
+		sc_status = ctx->p1.tzbsp.s4v2.sc_status;
+		sc_ns = ctx->p1.tzbsp.s4v2.sc_ns;
+		wdt_sts = ctx->p1.tzbsp.s4v2.wdt_sts;
 		break;
 	default:
-		MSMWDTD("msm_wdt_ctx: unsupported cpu_count %d\n", cpu_count);
-		return;
-	}
-	for (i = 0; i < cpu_count; i++) {
-		orr |= wdt_sts[i];
-		orr |= sc_ns[i].saved_ctx.mon_lr;
-	}
-	if (!orr) {
-		u32 *tzctx;
-		if (bi_powerup_reason() != PU_REASON_WDOG_AP_RESET)
-			return;
-		for (tzctx = sc_status; tzctx < (u32 *)ctx->p1.spare; tzctx++) {
-			orr |= *tzctx;
-			if (orr)
-				break;
-		}
-		if (!orr) {
-			MSMWDTD("\n*** Might be Watchdog Bite ***\n");
-			return;
-		} else {
-			MSMWDTD("*** Likely Bad Dump ***\n");
-		}
-	}
-	if ((ctx->p1.tzbsp.s0.magic != TZBSP_DUMP_CTX_MAGIC)
-		|| (ctx->p1.tzbsp.s0.version != TZBSP_DUMP_CTX_VERSION)
-		|| (ctx->p1.tzbsp.s0.cpu_count != cpu_count)) {
-		MSMWDTD("msm_wdt_ctx: tzbsp dump buffer mismatch.\n");
-		MSMWDTD("Expected: magic 0x%08x, version %d, cpu_count %d\n",
-			TZBSP_DUMP_CTX_MAGIC, TZBSP_DUMP_CTX_VERSION,
-			cpu_count);
-		MSMWDTD("Found:    magic 0x%08x, version %d, cpu_count %d\n",
-			ctx->p1.tzbsp.s0.magic, ctx->p1.tzbsp.s0.version,
-			ctx->p1.tzbsp.s0.cpu_count);
+		MSMWDTD("msm_wdt_ctx: unsupported cpu_count %d\n",
+			tzctx_cpu_count);
 		return;
 	}
 	MSMWDTD("sc_status: ");
@@ -810,9 +958,13 @@ static void msm_wdt_ctx_print(struct msm_wdt_ctx *ctx)
 	MSMWDTD("\n");
 	for (i = 0; i < cpu_count; i++) {
 		snprintf(label, sizeof(label) - 1, "CPU%d nsec", i);
-		msm_wdt_show_regs(&sc_ns[i].saved_ctx, label);
+		msm_wdt_show_regs(&sc_ns[i], 0, label);
 	}
-	msm_wdt_show_regs(&sc_ns[cpu_count].saved_ctx, "sec");
+	msm_wdt_show_regs(&sc_ns[tzctx_cpu_count], 1, "sec");
+}
+
+static int msm_wdt_lnx_ctx_header_check(struct msm_wdt_ctx *ctx)
+{
 	if ((ctx->p1.cinfo.sig != MSM_WDT_CTX_SIG)
 		|| (ctx->p1.cinfo.rev_tz != MSM_WDT_CTX_REV)
 		|| (ctx->p1.cinfo.size_tz != MSM_WDT_CTX_SIZE)) {
@@ -822,9 +974,36 @@ static void msm_wdt_ctx_print(struct msm_wdt_ctx *ctx)
 		MSMWDTD("Found:    sig 0x%08x, ver 0x%08x size 0x%08x\n",
 			ctx->p1.cinfo.sig, ctx->p1.cinfo.rev_tz,
 			ctx->p1.cinfo.size_tz);
+		return -EINVAL;
+	}
+	return 0;
+}
+
+static void msm_wdt_lnx_ctx_dump(struct msm_wdt_ctx *ctx)
+{
+	unsigned long stack_tmp = 0;
+	struct msm_wdt_pcp *pcp;
+	struct task_struct *task;
+	u8 (*stack)[THREAD_SIZE];
+	struct tzbsp_cpu_ctx_s *sc_ns;
+	const int tzctx_cpu_count = ctx->p1.tzbsp.s0.cpu_count;
+	const int cpu_count = get_core_count();
+	int i;
+
+	switch (tzctx_cpu_count) {
+	case NR_CPUS_2:
+		/* Common for v2, v3 and v4. */
+		sc_ns = ctx->p1.tzbsp.s2v2.sc_ns;
+		break;
+	case NR_CPUS_4:
+		sc_ns = ctx->p1.tzbsp.s4v2.sc_ns;
+		break;
+	default:
+		MSMWDTD("msm_wdt_ctx: unsupported cpu_count %d\n",
+			tzctx_cpu_count);
 		return;
 	}
-	/* now dump customized stuff */
+
 	MSMWDTD("\n");
 	MSMWDTD("ret 0x%08x\n", ctx->p1.cinfo.ret);
 	MSMWDTD("\n");
@@ -872,6 +1051,15 @@ static void msm_wdt_ctx_print(struct msm_wdt_ctx *ctx)
 		free_pages(stack_tmp, THREAD_SIZE_ORDER);
 }
 
+static void msm_wdt_ctx_print(struct msm_wdt_ctx *ctx, unsigned long phys)
+{
+	if (!msm_wdt_tzbsp_ctx_header_check(ctx, phys)) {
+		msm_wdt_tzbsp_ctx_dump(ctx);
+		if (!msm_wdt_lnx_ctx_header_check(ctx))
+			msm_wdt_lnx_ctx_dump(ctx);
+	}
+}
+
 static void msm_watchdog_ctx_lnx(struct msm_wdt_lnx_info *lnx)
 {
 	lnx->tsk_size = sizeof(struct task_struct);
@@ -896,7 +1084,7 @@ static void msm_watchdog_alloc_buf(struct msm_watchdog_data *wdog_dd)
 	unsigned long phys;
 	struct msm_wdt_ctx *ctx;
 
-	BUILD_BUG_ON((sizeof(union tzbsp_dump_buf_s)
+	BUILD_BUG_ON((sizeof(union tzbsp_dump_buf_s) + sizeof(struct scm_buf)
 		+ sizeof(struct msm_wdt_ctx_info)) > PAGE_SIZE);
 	BUILD_BUG_ON(CONFIG_NR_CPUS > NR_CPUS_MAX);
 
@@ -930,7 +1118,7 @@ static void msm_watchdog_alloc_buf(struct msm_watchdog_data *wdog_dd)
 		dev_err(wdog_dd->dev, "cannot remap buffer: %08lX\n", phys);
 		return;
 	}
-	msm_wdt_ctx_print(ctx);
+	msm_wdt_ctx_print(ctx, phys);
 	msm_wdt_ctx_reset(ctx);
 	iounmap(ctx);
 	return;
@@ -946,6 +1134,8 @@ no_reservation:
 	}
 	return;
 }
+
+EXPORT_COMPAT("qcom,msm-watchdog");
 
 #else /* CONFIG_MSM_WATCHDOG_CTX_PRINT undefined below */
 

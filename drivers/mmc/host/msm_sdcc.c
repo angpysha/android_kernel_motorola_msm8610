@@ -1884,6 +1884,12 @@ msmsdcc_irq(int irq, void *dev_id)
 		}
 
 		if (!atomic_read(&host->clks_on)) {
+			if (!host->pwr) {
+				pr_warn("%s: spurious interrupt detected\n",
+					mmc_hostname(host->mmc));
+				ret = 1;
+				break;
+			}
 			pr_debug("%s: %s: SDIO async irq received\n",
 					mmc_hostname(host->mmc), __func__);
 
@@ -2284,12 +2290,20 @@ msmsdcc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	spin_lock_irqsave(&host->lock, flags);
 
 	/*
-	 * Set timeout value to 10 secs (or more in case of buggy cards)
+	 * Set the controller catch-all timer to:
+	 *  - 20s for quirky cards
+	 * otherwise:
+	 *  - 500ms for CMD13
+	 *  - 8s for everything else
 	 */
 	if ((mmc->card) && (mmc->card->quirks & MMC_QUIRK_INAND_DATA_TIMEOUT))
 		host->curr.req_tout_ms = 20000;
-	else
-		host->curr.req_tout_ms = MSM_MMC_REQ_TIMEOUT;
+	else {
+		if (mrq->cmd->opcode == MMC_SEND_STATUS)
+			host->curr.req_tout_ms = 500;
+		else
+			host->curr.req_tout_ms = MSM_MMC_REQ_TIMEOUT;
+	}
 	/*
 	 * Kick the software request timeout timer here with the timeout
 	 * value identified above
@@ -3507,7 +3521,8 @@ msmsdcc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 			"tuning_in_progress but SDCC clocks are OFF\n");
 
 	/* Let interrupts be disabled if the host is powered off */
-	if (ios->power_mode != MMC_POWER_OFF && host->sdcc_irq_disabled) {
+	if (ios->power_mode != MMC_POWER_OFF &&
+		ios->power_mode != MMC_POWER_UP && host->sdcc_irq_disabled) {
 		enable_irq(host->core_irqres->start);
 		host->sdcc_irq_disabled = 0;
 	}
@@ -4496,6 +4511,7 @@ msmsdcc_check_status(unsigned long data)
 					" is ACTIVE_HIGH\n",
 					mmc_hostname(host->mmc),
 					host->oldstat, status);
+			host->mmc->card_bad = 0;
 			mmc_detect_change(host->mmc, 0);
 		}
 		host->oldstat = status;
@@ -6139,7 +6155,7 @@ msmsdcc_probe(struct platform_device *pdev)
 
 	mmc->caps2 |= MMC_CAP2_PACKED_WR;
 	mmc->caps2 |= MMC_CAP2_PACKED_WR_CONTROL;
-	mmc->caps2 |= (MMC_CAP2_BOOTPART_NOACC | MMC_CAP2_DETECT_ON_ERR);
+	mmc->caps2 |= MMC_CAP2_BOOTPART_NOACC;
 	mmc->caps2 |= MMC_CAP2_SANITIZE;
 	mmc->caps2 |= MMC_CAP2_CACHE_CTRL;
 	mmc->caps2 |= MMC_CAP2_POWEROFF_NOTIFY;

@@ -18,7 +18,6 @@
 
 #include <linux/cdev.h>
 #include <linux/delay.h>
-#include <linux/earlysuspend.h>
 #include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/export.h>
@@ -75,11 +74,11 @@ int stm401_load_brightness_table(struct stm401_data *ps_stm401)
 void stm401_reset(struct stm401_platform_data *pdata)
 {
 	dev_err(&stm401_misc_data->client->dev, "stm401_reset\n");
-	msleep_interruptible(stm401_i2c_retry_delay);
+	msleep(stm401_i2c_retry_delay);
 	gpio_set_value(pdata->gpio_reset, 0);
-	msleep_interruptible(stm401_i2c_retry_delay);
+	msleep(stm401_i2c_retry_delay);
 	gpio_set_value(pdata->gpio_reset, 1);
-	msleep_interruptible(STM401_RESET_DELAY);
+	msleep(STM401_RESET_DELAY);
 }
 
 int stm401_reset_and_init(void)
@@ -90,6 +89,9 @@ int stm401_reset_and_init(void)
 	int stm401_req_value;
 	unsigned int i;
 	int err, ret_err = 0;
+
+	if (stm401_misc_data->is_suspended)
+		return ret_err;
 
 	pdata = stm401_misc_data->pdata;
 
@@ -131,10 +133,18 @@ int stm401_reset_and_init(void)
 	if (err < 0)
 		ret_err = err;
 
+	stm401_cmdbuff[0] = STEP_COUNTER_UPDATE_RATE;
+	stm401_cmdbuff[1] = (stm401_g_step_counter_delay>>8);
+	stm401_cmdbuff[2] = stm401_g_step_counter_delay;
+	err = stm401_i2c_write_no_reset(stm401_misc_data, stm401_cmdbuff, 3);
+	if (err < 0)
+		ret_err = err;
+
 	stm401_cmdbuff[0] = NONWAKESENSOR_CONFIG;
 	stm401_cmdbuff[1] = stm401_g_nonwake_sensor_state & 0xFF;
-	stm401_cmdbuff[2] = stm401_g_nonwake_sensor_state >> 8;
-	err = stm401_i2c_write_no_reset(stm401_misc_data, stm401_cmdbuff, 3);
+	stm401_cmdbuff[2] = (stm401_g_nonwake_sensor_state >> 8) & 0xFF;
+	stm401_cmdbuff[3] = stm401_g_nonwake_sensor_state >> 16;
+	err = stm401_i2c_write_no_reset(stm401_misc_data, stm401_cmdbuff, 4);
 	if (err < 0)
 		ret_err = err;
 
@@ -175,6 +185,10 @@ int stm401_reset_and_init(void)
 				stm401_g_algo_requst[i].size + 1);
 		}
 	}
+	stm401_cmdbuff[0] = INTERRUPT_STATUS;
+	stm401_i2c_write_read_no_reset(stm401_misc_data, stm401_cmdbuff, 1, 2);
+	stm401_cmdbuff[0] = WAKESENSOR_STATUS;
+	stm401_i2c_write_read_no_reset(stm401_misc_data, stm401_cmdbuff, 1, 2);
 
 	stm401_cmdbuff[0] = PROX_SETTINGS;
 	stm401_cmdbuff[1]
@@ -215,14 +229,16 @@ int stm401_reset_and_init(void)
 		if (err < 0)
 			ret_err = err;
 
-		stm401_cmdbuff[0] = STM401_CONTROL_REG;
-		memcpy(&stm401_cmdbuff[1], stm401_g_control_reg,
-			STM401_CONTROL_REG_SIZE);
-		err = stm401_i2c_write_no_reset(stm401_misc_data,
-			stm401_cmdbuff,
-			STM401_CONTROL_REG_SIZE);
-		if (err < 0)
-			ret_err = err;
+		if (stm401_g_control_reg_restore) {
+			stm401_cmdbuff[0] = STM401_CONTROL_REG;
+			memcpy(&stm401_cmdbuff[1], stm401_g_control_reg,
+				STM401_CONTROL_REG_SIZE);
+			err = stm401_i2c_write_no_reset(stm401_misc_data,
+				stm401_cmdbuff,
+				STM401_CONTROL_REG_SIZE);
+			if (err < 0)
+				ret_err = err;
+		}
 
 		gpio_set_value(stm401_req_gpio, 1);
 	}
@@ -233,6 +249,21 @@ int stm401_reset_and_init(void)
 		STM401_MAG_CAL_SIZE);
 	if (err < 0)
 		ret_err = err;
+
+	if (stm401_g_ir_config_reg_restore) {
+		stm401_cmdbuff[0] = IR_CONFIG;
+		memcpy(&stm401_cmdbuff[1], stm401_g_ir_config_reg,
+			stm401_g_ir_config_reg[0]);
+		err = stm401_i2c_write_no_reset(stm401_misc_data,
+						stm401_cmdbuff,
+						stm401_g_ir_config_reg[0] + 1);
+		if (err < 0)
+			ret_err = err;
+	}
+
+	/* sending reset to slpc hal */
+	stm401_ms_data_buffer_write(stm401_misc_data, DT_RESET,
+		NULL, 0);
 
 	return ret_err;
 }

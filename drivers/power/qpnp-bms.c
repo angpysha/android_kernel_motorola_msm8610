@@ -93,6 +93,9 @@
 #define CHGCYL_RESOLUTION			20
 #define FCC_DEFAULT_TEMP			250
 
+/* Interrupt status reg offset */
+#define BMS1_INT_RT_STS				0x10
+#define CHG_BEGIN_INT_RT_STS			BIT(3)
 #define QPNP_BMS_DEV_NAME "qcom,qpnp-bms"
 
 enum {
@@ -310,6 +313,7 @@ static enum power_supply_property msm_bms_power_props[] = {
 
 static int discard_backup_fcc_data(struct qpnp_bms_chip *chip);
 static void backup_charge_cycle(struct qpnp_bms_chip *chip);
+static int clamp_soc_based_on_voltage(struct qpnp_bms_chip *chip, int soc);
 
 static bool bms_reset;
 static int last_ocv_uv = -EINVAL;
@@ -932,7 +936,7 @@ static void reset_for_new_battery(struct qpnp_bms_chip *chip, int batt_temp)
 }
 
 #define OCV_RAW_UNINITIALIZED	0xFFFF
-#define MIN_OCV_UV		2000000
+#define MIN_OCV_UV		2700000
 static int read_soc_params_raw(struct qpnp_bms_chip *chip,
 				struct raw_soc_params *raw,
 				int batt_temp)
@@ -968,11 +972,11 @@ static int read_soc_params_raw(struct qpnp_bms_chip *chip,
 		warm_reset = qpnp_pon_is_warm_reset();
 		if (raw->last_good_ocv_uv < MIN_OCV_UV
 				|| warm_reset > 0) {
-			pr_debug("OCV is stale or bad, estimating new OCV.\n");
+			pr_err("OCV is stale or bad, estimating new OCV.\n");
 			chip->last_ocv_uv = estimate_ocv(chip);
 			raw->last_good_ocv_uv = chip->last_ocv_uv;
 			reset_cc(chip, CLEAR_CC | CLEAR_SHDW_CC);
-			pr_debug("New PON_OCV_UV = %d, cc = %llx\n",
+			pr_err("New PON_OCV_UV = %d, cc = %llx\n",
 					chip->last_ocv_uv, raw->cc);
 		}
 	} else if (chip->new_battery) {
@@ -1755,29 +1759,33 @@ static int scale_soc_while_chg(struct qpnp_bms_chip *chip, int chg_time_sec,
 static void soc_sanity_check(struct qpnp_bms_chip *chip,
 			    int batt_temp, int soc)
 {
-	int pc;
-	int ibat_ua, vbat_uv, ocv_uv;
-	int rc;
-	int rbatt_mohm = get_rbatt(chip, soc, batt_temp);
+	struct qpnp_vadc_result v_result;
+	int i = 0;
+	int rc = 0;
 
 	if (wake_lock_active(&chip->low_voltage_wake_lock)) {
+		for (i = 0; i < 10; i++) {
+			rc = qpnp_vadc_read(chip->vadc_dev,
+					    VBAT_SNS, &v_result);
+			if (rc) {
+				pr_err("vadc read failed with rc: %d\n", rc);
+				return;
+			}
+			pr_err("Low Battery vadc result: %d\n",
+			       (int)v_result.physical);
+			if (v_result.physical > chip->low_voltage_threshold) {
+				pr_err("Low Bat recover vadc %d > %d\n",
+				       (int)v_result.physical,
+				       chip->low_voltage_threshold);
+				return;
+			}
+			udelay(10);
+		}
+
 		chip->last_soc = 0;
 		return;
 	}
 
-	rc = get_simultaneous_batt_v_and_i(chip, &ibat_ua, &vbat_uv);
-	if (rc) {
-		pr_err("simultaneous failed rc = %d\n", rc);
-		return;
-	}
-
-	ocv_uv = vbat_uv + (ibat_ua * rbatt_mohm) / 1000;
-	pc = calculate_pc(chip, ocv_uv, batt_temp);
-	pr_debug("voltage_soc = %d\n", pc);
-
-	/* for this first Interation just calculate */
-	/* voltage_soc but don't manipulate last_soc */
-	/* Calculation is done so that debug print will be generated */
 	return;
 }
 
@@ -1810,6 +1818,7 @@ static int report_cc_based_soc(struct qpnp_bms_chip *chip)
 	struct qpnp_vadc_result result;
 	int batt_temp;
 	int rc;
+	u8 chg_sts = 0;
 	bool charging, charging_since_last_report;
 
 	rc = wait_event_interruptible_timeout(chip->bms_wait_queue,
@@ -1916,6 +1925,22 @@ static int report_cc_based_soc(struct qpnp_bms_chip *chip)
 	pr_debug("last_soc = %d, calculated_soc = %d, soc = %d, time since last change = %d\n",
 			chip->last_soc, chip->calculated_soc,
 			soc, time_since_last_change_sec);
+
+	/* if last_soc < soc then report last soc as current soc */
+	rc = qpnp_read_wrapper(chip, &chg_sts,
+				(chip->base + BMS1_INT_RT_STS), 1);
+	if (rc)
+		pr_err("failed to read BMS interrupt sts %d\n", rc);
+	else if ((0 == (chg_sts & CHG_BEGIN_INT_RT_STS))
+		&& (chip->battery_status != POWER_SUPPLY_STATUS_FULL)
+		&& (chip->last_soc != -EINVAL)
+		&& (chip->last_soc < soc)) {
+			pr_err("calculated soc = %d ,last soc = %d\n", soc,
+				 chip->last_soc);
+			soc = chip->last_soc;
+	}
+
+	soc = clamp_soc_based_on_voltage(chip, soc);
 	chip->last_soc = bound_soc(soc);
 	soc_sanity_check(chip, batt_temp, chip->last_soc);
 	backup_soc_and_iavg(chip, batt_temp, chip->last_soc);
@@ -2037,11 +2062,11 @@ static void very_low_voltage_check(struct qpnp_bms_chip *chip, int vbat_uv)
 	 */
 	if (vbat_uv <= chip->low_voltage_threshold
 			&& !wake_lock_active(&chip->low_voltage_wake_lock)) {
-		pr_debug("voltage = %d low holding wakelock\n", vbat_uv);
+		pr_info("voltage = %d low holding wakelock\n", vbat_uv);
 		wake_lock(&chip->low_voltage_wake_lock);
 	} else if (vbat_uv > chip->low_voltage_threshold
 			&& wake_lock_active(&chip->low_voltage_wake_lock)) {
-		pr_debug("voltage = %d releasing wakelock\n", vbat_uv);
+		pr_info("voltage = %d releasing wakelock\n", vbat_uv);
 		wake_unlock(&chip->low_voltage_wake_lock);
 	}
 }
@@ -2662,7 +2687,7 @@ static void configure_vbat_monitor_low(struct qpnp_bms_chip *chip)
 		 */
 		pr_debug("battery entered cutoff range\n");
 		if (!wake_lock_active(&chip->low_voltage_wake_lock)) {
-			pr_debug("voltage low, holding wakelock\n");
+			pr_info("voltage low, holding wakelock\n");
 			wake_lock(&chip->low_voltage_wake_lock);
 			cancel_delayed_work_sync(
 					&chip->calculate_soc_delayed_work);
@@ -2734,7 +2759,7 @@ static void configure_vbat_monitor_high(struct qpnp_bms_chip *chip)
 		 */
 		pr_debug("battery entered normal range\n");
 		if (wake_lock_active(&chip->low_voltage_wake_lock)) {
-			pr_debug("voltage high, releasing wakelock\n");
+			pr_info("voltage high, releasing wakelock\n");
 			wake_unlock(&chip->low_voltage_wake_lock);
 		}
 		chip->vbat_monitor_params.state_request =
@@ -2758,12 +2783,22 @@ static void btm_notify_vbat(enum qpnp_tm_state state, void *ctx)
 	int vbat_uv;
 	struct qpnp_vadc_result result;
 	int rc;
+	u8 btm_lsb, btm_msb;
 
 	rc = qpnp_vadc_read(chip->vadc_dev, VBAT_SNS, &result);
 	pr_debug("vbat = %lld, raw = 0x%x\n", result.physical, result.adc_code);
 
 	get_battery_voltage(chip, &vbat_uv);
-	pr_debug("vbat is at %d, state is at %d\n", vbat_uv, state);
+	pr_info("vbat is at %d, state is at %d\n", vbat_uv, state);
+
+	/* Read the BTM Output for M2 spot which vbatt monitoring uses */
+	rc = qpnp_read_wrapper(chip, &btm_lsb, 0x34A2, 1);
+	rc |= qpnp_read_wrapper(chip, &btm_msb, 0x34A3, 1);
+	if (rc) {
+		pr_err("Unable to read data\n");
+	} else {
+		pr_info("BTM MSB 0x%X, BTM LSB 0x%X\n", btm_msb, btm_lsb);
+	}
 
 	if (state == ADC_TM_LOW_STATE) {
 		pr_debug("low voltage btm notification triggered\n");
@@ -2805,11 +2840,11 @@ static int reset_vbat_monitoring(struct qpnp_bms_chip *chip)
 		return rc;
 	}
 	if (wake_lock_active(&chip->low_voltage_wake_lock)) {
-		pr_debug("battery removed, releasing wakelock\n");
+		pr_info("battery removed, releasing wakelock\n");
 		wake_unlock(&chip->low_voltage_wake_lock);
 	}
 	if (chip->in_cv_range) {
-		pr_debug("battery removed, removing in_cv_range state\n");
+		pr_info("battery removed, removing in_cv_range state\n");
 		chip->in_cv_range = false;
 	}
 	return 0;
@@ -3487,6 +3522,7 @@ static int read_shutdown_iavg_ma(struct qpnp_bms_chip *chip)
 	}
 }
 
+#define SHUTDOWN_SOC_RECALC_THRES  5
 static int read_shutdown_soc(struct qpnp_bms_chip *chip)
 {
 	u8 stored_soc;
@@ -3509,8 +3545,16 @@ static int read_shutdown_soc(struct qpnp_bms_chip *chip)
 	else
 		shutdown_soc = SOC_INVALID;
 
-	pr_debug("stored soc = 0x%02x, shutdown_soc = %d\n",
+	pr_err("stored soc = 0x%02x, shutdown_soc = %d\n",
 			stored_soc, shutdown_soc);
+
+	/* Use the Power-up OCV when Shutdown SOC is Low */
+	if (shutdown_soc <= SHUTDOWN_SOC_RECALC_THRES) {
+		pr_err("soc below low soc threshold of %d Invalidate it!\n",
+		       SHUTDOWN_SOC_RECALC_THRES);
+		shutdown_soc = SOC_INVALID;
+	}
+
 	return shutdown_soc;
 }
 
