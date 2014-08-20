@@ -32,7 +32,6 @@
 #include "sdhci.h"
 
 #define DRIVER_NAME "sdhci"
-#define SDHCI_SUSPEND_TIMEOUT 300 /* 300 ms */
 
 #define DBG(f, x...) \
 	pr_debug(DRIVER_NAME " [%s()]: " f, __func__,## x)
@@ -68,12 +67,6 @@ static inline int sdhci_runtime_pm_put(struct sdhci_host *host)
 	return 0;
 }
 #endif
-
-static inline int sdhci_get_async_int_status(struct sdhci_host *host)
-{
-	return (sdhci_readw(host, SDHCI_HOST_CONTROL2) &
-		 SDHCI_CTRL_ASYNC_INT_ENABLE) >> 14;
-}
 
 static void sdhci_dump_state(struct sdhci_host *host)
 {
@@ -1071,7 +1064,7 @@ static void sdhci_finish_data(struct sdhci_host *host)
 		tasklet_schedule(&host->finish_tasklet);
 }
 
-#define SDHCI_REQUEST_TIMEOUT	10 /* Default request timeout in seconds */
+#define SDHCI_REQUEST_TIMEOUT	8 /* Default request timeout in seconds */
 
 static void sdhci_send_command(struct sdhci_host *host, struct mmc_command *cmd)
 {
@@ -1106,11 +1099,26 @@ static void sdhci_send_command(struct sdhci_host *host, struct mmc_command *cmd)
 		mdelay(1);
 	}
 
-	mod_timer(&host->timer, jiffies + SDHCI_REQUEST_TIMEOUT * HZ);
+	/*
+	 * Set the controller catch-all timer to:
+	 *  - 20s for quirky cards
+	 * otherwise:
+	 *  - 500ms for CMD13
+	 *  - 8s for everything else
+	 */
+	if ((host->mmc->card) && (host->mmc->card->quirks & MMC_QUIRK_INAND_DATA_TIMEOUT))
+		timeout = 20000;
+	else {
+		if (cmd->opcode == MMC_SEND_STATUS)
+			timeout = 500;
+		else
+			timeout = SDHCI_REQUEST_TIMEOUT * MSEC_PER_SEC;
+	}
 
-	if (cmd->cmd_timeout_ms > SDHCI_REQUEST_TIMEOUT * MSEC_PER_SEC)
-		mod_timer(&host->timer, jiffies +
-				(msecs_to_jiffies(cmd->cmd_timeout_ms * 2)));
+	if (timeout < cmd->cmd_timeout_ms * 2)
+		timeout = cmd->cmd_timeout_ms * 2;
+
+	mod_timer(&host->timer, jiffies + msecs_to_jiffies(timeout));
 
 	host->cmd = cmd;
 
@@ -1554,7 +1562,10 @@ static void sdhci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 		 * is no on-going data transfer. If so, we need to execute
 		 * tuning procedure before sending command.
 		 */
-		if ((host->flags & SDHCI_NEEDS_RETUNING) &&
+		if ((mrq->cmd->opcode != MMC_SEND_TUNING_BLOCK) &&
+		    (mrq->cmd->opcode != MMC_SEND_TUNING_BLOCK_HS400) &&
+		    (mrq->cmd->opcode != MMC_SEND_TUNING_BLOCK_HS200) &&
+		    (host->flags & SDHCI_NEEDS_RETUNING) &&
 		    !(present_state & (SDHCI_DOING_WRITE | SDHCI_DOING_READ))) {
 			if (mmc->card) {
 				/* eMMC uses cmd21 but sd and sdio use cmd19 */
@@ -1562,6 +1573,7 @@ static void sdhci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 					mmc->card->type == MMC_TYPE_MMC ?
 					MMC_SEND_TUNING_BLOCK_HS200 :
 					MMC_SEND_TUNING_BLOCK;
+				host->mrq = NULL;
 				spin_unlock_irqrestore(&host->lock, flags);
 				sdhci_execute_tuning(mmc, tuning_opcode);
 				spin_lock_irqsave(&host->lock, flags);
@@ -1581,38 +1593,12 @@ static void sdhci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	spin_unlock_irqrestore(&host->lock, flags);
 }
 
-static void sdhci_cfg_async_intr(struct sdhci_host *host, bool enable)
-{
-	if (!host->async_int_supp)
-		return;
-
-	if (enable)
-		sdhci_writew(host,
-			     sdhci_readw(host, SDHCI_HOST_CONTROL2) |
-			     SDHCI_CTRL_ASYNC_INT_ENABLE,
-			     SDHCI_HOST_CONTROL2);
-	else
-		sdhci_writew(host, sdhci_readw(host, SDHCI_HOST_CONTROL2) &
-			     ~SDHCI_CTRL_ASYNC_INT_ENABLE,
-			     SDHCI_HOST_CONTROL2);
-}
-
-static void sdhci_cfg_irq(struct sdhci_host *host, bool enable)
-{
-	if (enable && !host->irq_enabled) {
-		enable_irq(host->irq);
-		host->irq_enabled = true;
-	} else if (!enable && host->irq_enabled) {
-		disable_irq_nosync(host->irq);
-		host->irq_enabled = false;
-	}
-}
-
 static void sdhci_do_set_ios(struct sdhci_host *host, struct mmc_ios *ios)
 {
 	unsigned long flags;
 	int vdd_bit = -1;
 	u8 ctrl;
+	int ret;
 
 	mutex_lock(&host->ios_mutex);
 	if (host->flags & SDHCI_DEVICE_DEAD) {
@@ -1622,44 +1608,50 @@ static void sdhci_do_set_ios(struct sdhci_host *host, struct mmc_ios *ios)
 		return;
 	}
 
-	spin_lock_irqsave(&host->lock, flags);
-	/* lock is being released intermittently below, hence disable irq */
-	sdhci_cfg_irq(host, false);
-	spin_unlock_irqrestore(&host->lock, flags);
-	if (ios->clock) {
+	if (ios->clock)
 		sdhci_set_clock(host, ios->clock);
-		if (host->async_int_supp && sdhci_get_async_int_status(host)) {
-			if (host->disable_sdio_irq_deferred) {
-				pr_debug("%s: %s: disable sdio irq\n",
-					 mmc_hostname(host->mmc), __func__);
-				host->mmc->ops->enable_sdio_irq(host->mmc, 0);
-				host->disable_sdio_irq_deferred = false;
+
+	/*
+	 * The controller clocks may be off during power-up and we may end up
+	 * enabling card clock before giving power to the card. Hence, during
+	 * MMC_POWER_UP enable the controller clock and turn-on the regulators.
+	 * The mmc_power_up would provide the necessary delay before turning on
+	 * the clocks to the card.
+	 */
+	if (ios->power_mode & MMC_POWER_UP) {
+		if (host->ops->enable_controller_clock) {
+			ret = host->ops->enable_controller_clock(host);
+			if (ret) {
+				pr_err("%s: enabling controller clock: failed: %d\n",
+				       mmc_hostname(host->mmc), ret);
+			} else {
+				vdd_bit = sdhci_set_power(host, ios->vdd);
+
+				if (host->vmmc && vdd_bit != -1)
+					mmc_regulator_set_ocr(host->mmc,
+							      host->vmmc,
+							      vdd_bit);
 			}
-			spin_lock_irqsave(&host->lock, flags);
-			sdhci_cfg_async_intr(host, false);
-			spin_unlock_irqrestore(&host->lock, flags);
-			pr_debug("%s: %s: unconfig async intr\n",
-				 mmc_hostname(host->mmc), __func__);
 		}
 	}
-
 	spin_lock_irqsave(&host->lock, flags);
 	if (!host->clock) {
-		sdhci_cfg_irq(host, true);
 		spin_unlock_irqrestore(&host->lock, flags);
 		mutex_unlock(&host->ios_mutex);
 		return;
 	}
 	spin_unlock_irqrestore(&host->lock, flags);
 
-	if (ios->power_mode & (MMC_POWER_UP | MMC_POWER_ON))
+	if (!host->ops->enable_controller_clock && (ios->power_mode &
+						    (MMC_POWER_UP |
+						     MMC_POWER_ON))) {
 		vdd_bit = sdhci_set_power(host, ios->vdd);
 
-	if (host->vmmc && vdd_bit != -1)
-		mmc_regulator_set_ocr(host->mmc, host->vmmc, vdd_bit);
+		if (host->vmmc && vdd_bit != -1)
+			mmc_regulator_set_ocr(host->mmc, host->vmmc, vdd_bit);
+	}
 
 	spin_lock_irqsave(&host->lock, flags);
-
 	if (host->ops->platform_send_init_74_clocks)
 		host->ops->platform_send_init_74_clocks(host, ios->power_mode);
 
@@ -1803,18 +1795,9 @@ static void sdhci_do_set_ios(struct sdhci_host *host, struct mmc_ios *ios)
 		if (host->vmmc && vdd_bit != -1)
 			mmc_regulator_set_ocr(host->mmc, host->vmmc, vdd_bit);
 	}
-	if (!ios->clock) {
-		if (host->async_int_supp && host->mmc->card &&
-		    mmc_card_sdio(host->mmc->card)) {
-			sdhci_cfg_async_intr(host, true);
-			pr_debug("%s: %s: config async intr\n",
-				mmc_hostname(host->mmc), __func__);
-		}
+	if (!ios->clock)
 		sdhci_set_clock(host, ios->clock);
-	}
-	spin_lock_irqsave(&host->lock, flags);
-	sdhci_cfg_irq(host, true);
-	spin_unlock_irqrestore(&host->lock, flags);
+
 	mmiowb();
 	mutex_unlock(&host->ios_mutex);
 }
@@ -1893,14 +1876,6 @@ static void sdhci_enable_sdio_irq_nolock(struct sdhci_host *host, int enable)
 {
 	if (host->flags & SDHCI_DEVICE_DEAD)
 		goto out;
-
-	if (!enable && !host->clock) {
-		pr_debug("%s: %s: defered disabling card intr\n",
-			 host->mmc ? mmc_hostname(host->mmc) : "null",
-			 __func__);
-		host->disable_sdio_irq_deferred = true;
-		return;
-	}
 
 	if (enable)
 		host->flags |= SDHCI_SDIO_IRQ_ENABLED;
@@ -2015,6 +1990,8 @@ static int sdhci_do_start_signal_voltage_switch(struct sdhci_host *host,
 		 * failed. We power cycle the card, and retry initialization
 		 * sequence by setting S18R to 0.
 		 */
+		pr_info(DRIVER_NAME ": Switching to 1.8V signalling "
+			"voltage failed, retrying with S18R set to 0\n");
 		pwr = sdhci_readb(host, SDHCI_POWER_CONTROL);
 		pwr &= ~SDHCI_POWER_ON;
 		sdhci_writeb(host, pwr, SDHCI_POWER_CONTROL);
@@ -2023,13 +2000,15 @@ static int sdhci_do_start_signal_voltage_switch(struct sdhci_host *host,
 
 		/* Wait for 1ms as per the spec */
 		usleep_range(1000, 1500);
+
+		if (host->ops->hw_reset)
+			host->ops->hw_reset(host);
+
 		pwr |= SDHCI_POWER_ON;
 		sdhci_writeb(host, pwr, SDHCI_POWER_CONTROL);
 		if (host->ops->check_power_status)
 			host->ops->check_power_status(host, REQ_BUS_ON);
 
-		pr_info(DRIVER_NAME ": Switching to 1.8V signalling "
-			"voltage failed, retrying with S18R set to 0\n");
 		return -EAGAIN;
 	} else
 		/* No signal voltage switch required */
@@ -2573,6 +2552,8 @@ static void sdhci_cmd_irq(struct sdhci_host *host, u32 intmask)
 	}
 
 	if (host->cmd->error) {
+		if (host->cmd->error == -EILSEQ)
+			host->flags |= SDHCI_NEEDS_RETUNING;
 		tasklet_schedule(&host->finish_tasklet);
 		return;
 	}
@@ -2642,7 +2623,7 @@ static void sdhci_show_adma_error(struct sdhci_host *host)
 static void sdhci_data_irq(struct sdhci_host *host, u32 intmask)
 {
 	u32 command;
-	bool pr_msg = false;
+	bool pr_msg = true;
 	BUG_ON(intmask == 0);
 
 	/* CMD19 generates _only_ Buffer Read Ready interrupt */
@@ -2687,9 +2668,10 @@ static void sdhci_data_irq(struct sdhci_host *host, u32 intmask)
 		host->data->error = -EILSEQ;
 	else if ((intmask & SDHCI_INT_DATA_CRC) &&
 		SDHCI_GET_CMD(sdhci_readw(host, SDHCI_COMMAND))
-			!= MMC_BUS_TEST_R)
+			!= MMC_BUS_TEST_R) {
 		host->data->error = -EILSEQ;
-	else if (intmask & SDHCI_INT_ADMA_ERROR) {
+		pr_msg = false;
+	} else if (intmask & SDHCI_INT_ADMA_ERROR) {
 		pr_err("%s: ADMA error\n", mmc_hostname(host->mmc));
 		sdhci_show_adma_error(host);
 		host->data->error = -EIO;
@@ -2701,10 +2683,11 @@ static void sdhci_data_irq(struct sdhci_host *host, u32 intmask)
 							    SDHCI_COMMAND));
 			if ((command != MMC_SEND_TUNING_BLOCK_HS400) &&
 			    (command != MMC_SEND_TUNING_BLOCK_HS200) &&
-			    (command != MMC_SEND_TUNING_BLOCK))
-				pr_msg = true;
-		} else {
-			pr_msg = true;
+			    (command != MMC_SEND_TUNING_BLOCK)) {
+				if (intmask & SDHCI_INT_DATA_CRC)
+					host->flags |= SDHCI_NEEDS_RETUNING;
+			} else
+				pr_msg = false;
 		}
 		if (pr_msg) {
 			pr_err("%s: data txfr (0x%08x) error: %d after %lld ms\n",
@@ -2776,23 +2759,6 @@ static irqreturn_t sdhci_irq(int irq, void *dev_id)
 		return IRQ_HANDLED;
 	}
 
-	if (!host->clock && host->mmc->card &&
-	    mmc_card_sdio(host->mmc->card)) {
-		/* SDIO async. interrupt is level-sensitive */
-		sdhci_cfg_irq(host, false);
-		pr_debug("%s: got async-irq: clocks: %d gated: %d host-irq[en:1/dis:0]: %d\n",
-			mmc_hostname(host->mmc), host->clock,
-			host->mmc->clk_gated, host->irq_enabled);
-		spin_unlock(&host->lock);
-		/* prevent suspend till the ksdioirqd runs or resume happens */
-		if ((host->mmc->dev_status == DEV_SUSPENDING) ||
-		    (host->mmc->dev_status == DEV_SUSPENDED))
-			pm_wakeup_event(&host->mmc->card->dev,
-					SDHCI_SUSPEND_TIMEOUT);
-		else
-			mmc_signal_sdio_irq(host->mmc);
-		return IRQ_HANDLED;
-	}
 	intmask = sdhci_readl(host, SDHCI_INT_STATUS);
 
 	if (!intmask || intmask == 0xffffffff) {
@@ -2888,13 +2854,9 @@ out:
 	/*
 	 * We have to delay this as it calls back into the driver.
 	 */
-	if (cardint) {
-		/* clks are on, but suspend may be in progress */
-		if (host->mmc->dev_status == DEV_SUSPENDING)
-			pm_wakeup_event(&host->mmc->card->dev,
-					SDHCI_SUSPEND_TIMEOUT);
+	if (cardint)
 		mmc_signal_sdio_irq(host->mmc);
-	}
+
 	return result;
 }
 
@@ -3544,7 +3506,6 @@ int sdhci_add_host(struct sdhci_host *host)
 	if (ret)
 		goto untasklet;
 
-	host->irq_enabled = true;
 	host->vmmc = regulator_get(mmc_dev(mmc), "vmmc");
 	if (IS_ERR(host->vmmc)) {
 		pr_info("%s: no vmmc regulator found\n", mmc_hostname(mmc));
@@ -3588,12 +3549,8 @@ int sdhci_add_host(struct sdhci_host *host)
 					mmc_hostname(mmc), ret);
 	}
 
-	if (caps[0] & SDHCI_ASYNC_INTR)
-		host->async_int_supp = true;
 	mmc_add_host(mmc);
 
-	if (host->quirks2 & SDHCI_QUIRK2_IGN_DATA_END_BIT_ERROR)
-		sdhci_clear_set_irqs(host, SDHCI_INT_DATA_END_BIT, 0);
 	pr_info("%s: SDHCI controller on %s [%s] using %s\n",
 		mmc_hostname(mmc), host->hw_name, dev_name(mmc_dev(mmc)),
 		(host->flags & SDHCI_USE_ADMA) ? "ADMA" :

@@ -11,15 +11,21 @@
  * GNU General Public License for more details.
  */
 
+/include/ "msm8610-moto-gpiomux.dtsi"
 /include/ "msm8610-camera-sensor-moto.dtsi"
 /include/ "dsi-panel-mot-tianma-qhd-video.dtsi"
 /include/ "dsi-panel-mot-inx-qhd-video.dtsi"
 /include/ "dsi-panel-mot-dummy-qhd-video.dtsi"
-
+/include/ "carrier-channel-ids.dtsi"
 
 / {
 	model = "Motorola QC-MSM8610";
 	compatible = "qcom,msm8610-moto", "qcom,msm8610";
+
+	memory {
+		reg = <0x00000000 0x00000000>,
+		      <0x00000000 0x00000000>;
+	};
 };
 
 &soc {
@@ -49,7 +55,14 @@
 		android,ram-buffer-size = <0x20000>;
 	};
 
-        fan5646_vreg: fan5646_vreg {
+	bootinfo {
+		compatible = "android,bootinfo";
+
+		android,bootinfo-buffer-start = <0x3eb00000>;
+		android,bootinfo-buffer-size = <0x800>;
+	};
+
+	fan5646_vreg: fixedregulator@0 {
 		status = "ok";
 		compatible = "regulator-fixed";
 		regulator-name = "fan5646_vreg";
@@ -78,7 +91,7 @@
 			interrupts = <1 0>;
 			gpios = <&msmgpio 1 0>, /* IRQ */
 				<&msmgpio 0 0>; /* RESET */
-			touch_vdd-supply = <&pm8110_l19>;
+			touch_vdd-supply = <&pm8110_l14>;
 			synaptics,normal-mode = <1>;
 			synaptics,gpio-config;
 		};
@@ -91,8 +104,9 @@
 	};
 
 	usb@f9a55000 {
+		qcom,hsusb-otg-phy-init-seq =
+			<0x44 0x80 0x33 0x81 0x24 0x82 0x13 0x83 0xffffffff>;
 		otg,id_flt_gpio = <&msmgpio 75 0x0>;
-		otg,id_gnd_gpio = <&msmgpio 76 0x0>;
 		id_flt_active_high = <1>;
 		id_gnd_active_high = <1>;
 	};
@@ -169,13 +183,16 @@
 			"AMIC1", "MIC BIAS External",
 			"AMIC2", "MIC BIAS Internal2",
 			"AMIC3", "MIC BIAS External";
+
+		qcom,ext-spk-amp-gpio = <&msmgpio 4 0x0>;
+		boost-supply = <&fan5646_vreg>; /* phandle of our regulator node */
 	};
 
 	hob_ram@f500000 {
 		compatible = "mmi,hob_ram";
 		reg = <0x0f500000 0x40000>,
-		      <0x0f540000 0x2000>;
-		qcom,memblock-reserve = <0x0f500000 0x42000>;
+		      <0x0f540000 0x8000>;
+		qcom,memblock-reserve = <0x0f500000 0x48000>;
 	};
 
 	mmi_batterydata: qcom,battery-data {
@@ -186,6 +203,10 @@
 		/include/ "batterydata-el40-lishen.dtsi"
 		/include/ "batterydata-el40-sony.dtsi"
 		/include/ "batterydata-el40-atl.dtsi"
+	};
+
+	alsa_to_h2w {
+		compatible = "mmi,alsa-to-h2w";
 	};
 };
 
@@ -277,8 +298,8 @@
 		interrupt-parent = <&msmgpio>;
 		interrupts = <84 0x2>;
 		gpios = <&msmgpio 84 0x0>;
-		hs_det_vdd-supply = <&pm8110_l6>;
-		hs_det_micvdd-supply = <&pm8110_l22>;
+		hs_det_vdd-supply = <&pm8110_l14>;
+		hs_det_micvdd-supply = <&pm8110_l20>;
 	};
 
 	kionix@e {
@@ -362,6 +383,18 @@
 	qcom,i2c-bus-freq = <400000>;
 };
 
+&spi_4 {
+	nmi326@0 {
+		compatible = "nmi,nmi326";
+		reg = <0>;
+		spi-max-frequency = <9600000>;
+		irq-gpio = <&msmgpio 90 0>;
+		reset-gpio = <&msmgpio 91 0>;
+		enable-gpio = <&msmgpio 85 0>;
+		enable-active-high;
+	};
+};
+
 &spmi_bus {
 	qcom,pm8110@0 {
 		qcom,leds@1000 {
@@ -392,9 +425,19 @@
 				qcom,source-sel = <8>;
 				qcom,mode-ctrl = <0x10>;
 				qcom,pwm-channel = <0>;
-				qcom,pwm-us = <14>;
+				qcom,pwm-us = <25>;
 				qcom,vin-ctrl = <0x03>;
 				qcom,mode = "pwm";
+				mmi,panels {
+					panel@0 {
+						panel_name = "mipi_mot_video_tianma_qhd_430";
+						backlight_scale = <67>;
+					};
+					panel@1 {
+						panel_name = "mipi_mot_video_inx_qhd_430";
+						backlight_scale = <100>;
+					};
+				};
 			};
 		};
 
@@ -509,9 +552,13 @@
 		qcom,vibrator@c000 {
 			status = "okay";
 			qcom,vib-timeout-ms = <30000>;
-			qcom,vib-vtg-level-mV = <1300>;
+			qcom,vib-vtg-level-mV = <1800>;
 			qcom,vib-vtg-level-mV-haptic = <2500>;
 			qcom,vib-boot-up-vibe-ms = <200>;
+		};
+
+		pwm@bc00 {
+			qcom,force-pwm-size = <9>;
 		};
 	};
 };
@@ -555,7 +602,7 @@
 	qcom,pad-drv-on = <0x4 0x4 0x4>; /* 10mA, 10mA, 10mA */
 	qcom,pad-drv-off = <0x0 0x0 0x0>; /* 2mA, 2mA, 2mA */
 
-	qcom,clk-rates = <400000 25000000 50000000 100000000 200000000>;
+	qcom,clk-rates = <400000 25000000 50000000>;
 
 	#address-cells = <0>;
 	interrupt-parent = <&sdhc_2>;
@@ -567,7 +614,7 @@
 			2 &msmgpio 42 0x3>;
 	interrupt-names = "hc_irq", "pwr_irq", "status_irq";
 	cd-gpios = <&msmgpio 42 0x1>;
-	qcom,bus-speed-mode = "SDR25_1p8v", "SDR12_1p8v";
+	qcom,bus-speed-mode = "SDR12_1p8v", "SDR25_1p8v";
 
 	status = "ok";
 };
@@ -587,7 +634,7 @@
 	qcom,vddsafe-mv = <4400>;
 	qcom,vinmin-mv = <4300>;
 	qcom,vbatdet-delta-mv = <150>;
-	qcom,ibatmax-ma = <2000>;
+	qcom,ibatmax-ma = <1500>;
 	qcom,ibatterm-ma = <100>;
 	qcom,ibatsafe-ma = <3250>;
 	qcom,thermal-mitigation = <1500 700 600 325>;
@@ -601,7 +648,7 @@
 	qcom,batt-hot-percentage = <25>;
 	qcom,batt-cold-percentage = <80>;
 	qcom,step-charge-voltage = <4200>;
-	qcom,step-charge-current = <1130>;
+	qcom,step-charge-current = <1250>;
 
 	qcom,chgr@1000 {
 		status = "ok";
@@ -690,11 +737,6 @@
 
 &mdss_mdp {
 	qcom,mdss-pref-prim-intf = "dsi";
-};
-
-&mdss_fb0 {
-	qcom,memory-reservation-type = "EBI1";
-	qcom,memory-reservation-size = <0x800000>;
 };
 
 &mdss_dsi0 {

@@ -103,6 +103,7 @@
 #define CT406_ID			0x12
 
 #define CT406_STATUS			0x13
+#define CT406_STATUS_PVALID		(1<<1)
 #define CT406_STATUS_PINT		(1<<5)
 #define CT406_STATUS_AINT		(1<<4)
 
@@ -124,6 +125,8 @@
 #define CT406_ALS_HIGH_TO_LOW_THRESHOLD	100	/* 100 lux */
 
 #define CT406_ALS_IRQ_DELTA_PERCENT	5
+
+#define CT406_MAX_PROX_WAIT		20
 
 enum ct406_prox_mode {
 	CT406_PROX_MODE_UNKNOWN,
@@ -157,6 +160,7 @@ struct ct406_data {
 	unsigned int prox_starting;
 	unsigned int prox_enabled;
 	enum ct406_prox_mode prox_mode;
+	unsigned int prox_first_report;
 	unsigned int als_requested;
 	unsigned int als_enabled;
 	unsigned int als_apers;
@@ -167,6 +171,7 @@ struct ct406_data {
 	unsigned int prox_noise_floor;
 	unsigned int prox_low_threshold;
 	unsigned int prox_high_threshold;
+	unsigned int prox_ppers;
 	unsigned int als_low_threshold;
 	unsigned int als_high_threshold;
 	u16 prox_covered_offset;
@@ -294,6 +299,7 @@ static int ct406_write_enable(struct ct406_data *ct)
 {
 	int error = 0;
 	u8 reg_data[2] = {0x00, 0x00};
+
 	reg_data[0] = CT406_ENABLE;
 	if (ct->oscillator_enabled || ct->als_enabled || ct->prox_enabled) {
 		reg_data[1] |= CT406_ENABLE_PON;
@@ -314,7 +320,9 @@ static int ct406_write_enable(struct ct406_data *ct)
 	if (ct406_debug & CT406_DBG_ENABLE_DISABLE)
 		pr_info("%s: writing ENABLE=0x%02x\n", __func__, reg_data[1]);
 
-	return ct406_i2c_write(ct, reg_data, 1);
+	error = ct406_i2c_write(ct, reg_data, 1);
+
+	return error;
 }
 
 static int ct406_set_als_enable(struct ct406_data *ct,
@@ -406,8 +414,9 @@ static int ct406_init_registers(struct ct406_data *ct)
 		return error;
 
 	/* write proximity interrupt persistence */
+	ct->prox_ppers = CT406_PERS_PPERS;
 	reg_data[0] = CT406_PERS;
-	reg_data[1] = CT406_PERS_PPERS;
+	reg_data[1] = ct->prox_ppers;
 	error = ct406_i2c_write(ct, reg_data, 1);
 	if (error < 0)
 		return error;
@@ -683,7 +692,7 @@ static int ct406_enable_als(struct ct406_data *ct)
 
 	/* write ALS interrupt persistence */
 	reg_data[0] = CT406_PERS;
-	reg_data[1] = CT406_PERS_PPERS;
+	reg_data[1] = ct->prox_ppers;
 	error = ct406_i2c_write(ct, reg_data, 1);
 	if (error < 0) {
 		pr_err("%s: Error  %d\n", __func__, error);
@@ -730,45 +739,66 @@ static int ct406_disable_als(struct ct406_data *ct)
 	return 0;
 }
 
-static void ct406_measure_noise_floor(struct ct406_data *ct)
+static int ct406_measure_noise_floor(struct ct406_data *ct)
 {
 	int error = -EINVAL;
 	unsigned int num_samples = ct->pdata->prox_samples_for_noise_floor;
 	unsigned int i, sum = 0, avg = 0;
 	unsigned int max = ct->pdata_max - 1 - ct->prox_covered_offset;
 	u8 reg_data[2] = {0};
+	u8 enable_reg;
+	int prox_count = 0;
+	u8 status = 0;
+
+	reg_data[0] = CT406_ENABLE;
+	error = ct406_i2c_read(ct, reg_data, 1);
+	if (error) {
+		pr_err("%s: Error reading enable register: %d\n",
+			__func__, error);
+		return error;
+	}
+	enable_reg = reg_data[0];
+
+	reg_data[0] = CT406_ENABLE;
+	reg_data[1] = CT406_ENABLE_PEN | CT406_ENABLE_PON;
+	error = ct406_i2c_write(ct, reg_data, 1);
+	if (error < 0) {
+		pr_err("%s: Error  %d\n", __func__, error);
+		return error;
+	}
+
+	do {
+		reg_data[0] = CT406_STATUS;
+		error = ct406_i2c_read(ct, reg_data, 1);
+		if (error < 0)
+			return error;
+		status = reg_data[0];
+		if (!(status & CT406_STATUS_PVALID)) {
+			prox_count++;
+			if (prox_count >= CT406_MAX_PROX_WAIT) {
+				pr_err("%s: Prox valid timeout.\n"
+					, __func__);
+				break;
+			}
+			usleep_range(2000, 3000);
+		}
+	} while (!(status & CT406_STATUS_PVALID));
 
 	for (i = 0; i < num_samples; i++) {
-		/* enable prox sensor and wait */
-		error = ct406_set_prox_enable(ct, 1);
-		if (error) {
-			pr_err("%s: Error enabling proximity sensor: %d\n",
-				__func__, error);
-			break;
-		}
-		usleep_range(12000, 12100);
 
 		reg_data[0] = (CT406_PDATA | CT406_COMMAND_AUTO_INCREMENT);
 		error = ct406_i2c_read(ct, reg_data, 2);
 		if (error) {
 			pr_err("%s: Error reading prox data: %d\n",
 				__func__, error);
-			break;
+			return error;
 		}
 		sum += (reg_data[1] << 8) | reg_data[0];
-
-		/* disable prox sensor */
-		error = ct406_set_prox_enable(ct, 0);
-		if (error) {
-			pr_err("%s: Error disabling proximity sensor: %d\n",
-				__func__, error);
-			break;
-		}
+		if (i < (num_samples - 1))
+			usleep_range(6000, 7000);
 	}
 
-	if (!error)
-		avg = sum / num_samples;
-
+	avg = sum / num_samples;
 	if (avg < max)
 		ct->prox_noise_floor = avg;
 	else
@@ -778,16 +808,38 @@ static void ct406_measure_noise_floor(struct ct406_data *ct)
 		pr_info("%s: Noise floor is 0x%x\n", __func__,
 			ct->prox_noise_floor);
 
+	reg_data[0] = CT406_ENABLE;
+	reg_data[1] = enable_reg;
+	error = ct406_i2c_write(ct, reg_data, 1);
+	if (error < 0) {
+		pr_err("%s: Error  %d\n", __func__, error);
+		return error;
+	}
+
 	ct->prox_mode = CT406_PROX_MODE_STARTUP;
-	ct->prox_low_threshold = 0;
+	ct->prox_low_threshold = 1;
 	ct->prox_high_threshold = 0;
 	ct406_write_prox_thresholds(ct);
-	pr_info("%s: Prox mode startup\n", __func__);
+
+	ct->prox_ppers = 0;
+	reg_data[0] = CT406_PERS;
+	reg_data[1] = ct->als_apers;
+	error = ct406_i2c_write(ct, reg_data, 1);
+	if (error) {
+		pr_err("%s: Error setting proximity persistance: %d\n",
+			__func__, error);
+		return error;
+	}
+	ct->prox_first_report = 0;
 
 	error = ct406_set_prox_enable(ct, 1);
-	if (error)
+	if (error) {
 		pr_err("%s: Error enabling proximity sensor: %d\n",
 			__func__, error);
+		return error;
+	}
+
+	return 0;
 }
 
 static int ct406_enable_prox(struct ct406_data *ct)
@@ -805,14 +857,15 @@ static int ct406_enable_prox(struct ct406_data *ct)
 			return error;
 	}
 
-	ct406_measure_noise_floor(ct);
+	error = ct406_measure_noise_floor(ct);
 
-	return 0;
+	return error;
 }
 
 static int ct406_disable_prox(struct ct406_data *ct)
 {
 	if (ct->prox_enabled) {
+		pr_info("%s: Prox mode stop\n", __func__);
 		ct406_set_prox_enable(ct, 0);
 		ct406_clear_prox_flag(ct);
 		ct->prox_mode = CT406_PROX_MODE_UNKNOWN;
@@ -834,6 +887,18 @@ static void ct406_report_prox(struct ct406_data *ct)
 	u8 reg_data[2] = {0};
 	unsigned int pdata = 0;
 
+	if (ct->prox_first_report == 0) {
+		ct->prox_ppers = CT406_PERS_PPERS;
+		reg_data[0] = CT406_PERS;
+		reg_data[1] = ct->prox_ppers | ct->als_apers;
+		error = ct406_i2c_write(ct, reg_data, 1);
+		if (error < 0) {
+			wake_unlock(&ct->wl);
+			return;
+		}
+		ct->prox_first_report = 1;
+	}
+
 	reg_data[0] = (CT406_PDATA | CT406_COMMAND_AUTO_INCREMENT);
 	error = ct406_i2c_read(ct, reg_data, 2);
 	if (error < 0) {
@@ -843,7 +908,7 @@ static void ct406_report_prox(struct ct406_data *ct)
 
 	pdata = (reg_data[1] << 8) | reg_data[0];
 	if (ct406_debug & CT406_DBG_INPUT)
-		pr_info("%s: PDATA = %d\n", __func__, pdata);
+		pr_info("%s: PDATA = 0x%04x\n", __func__, pdata);
 
 	switch (ct->prox_mode) {
 	case CT406_PROX_MODE_UNKNOWN:
@@ -851,8 +916,10 @@ static void ct406_report_prox(struct ct406_data *ct)
 		wake_unlock(&ct->wl);
 		break;
 	case CT406_PROX_MODE_UNCOVERED:
-		if (pdata < ct->prox_low_threshold)
+		if (pdata < ct->prox_low_threshold) {
+			pr_info("%s: Prox mode recalibrate\n", __func__);
 			ct406_enable_prox(ct);
+		}
 		if (pdata > ct->prox_high_threshold) {
 			input_event(ct->dev, EV_MSC, MSC_RAW,
 				CT406_PROXIMITY_NEAR);
@@ -999,7 +1066,7 @@ static void ct406_report_als(struct ct406_data *ct)
 	if (ct->als_first_report == 0) {
 		/* write ALS interrupt persistence */
 		reg_data[0] = CT406_PERS;
-		reg_data[1] = CT406_PERS_PPERS | ct->als_apers;
+		reg_data[1] = ct->prox_ppers | ct->als_apers;
 		error = ct406_i2c_write(ct, reg_data, 1);
 		if (error < 0) {
 			pr_err("%s: Error  %d\n", __func__, error);
@@ -1350,8 +1417,10 @@ static void ct406_work_prox_start(struct work_struct *work)
 		container_of(work, struct ct406_data, work_prox_start);
 
 	mutex_lock(&ct->mutex);
-	if (ct->prox_starting)
+	if (ct->prox_starting) {
+		pr_info("%s: Prox mode start\n", __func__);
 		ct406_enable_prox(ct406_misc_data);
+	}
 	ct->prox_starting = 0;
 	mutex_unlock(&ct->mutex);
 }
@@ -1515,6 +1584,7 @@ static int ct406_probe(struct i2c_client *client,
 	ct->prox_starting = 0;
 	ct->prox_enabled = 0;
 	ct->prox_mode = CT406_PROX_MODE_UNKNOWN;
+	ct->prox_first_report = 0;
 	ct->als_requested = 0;
 	ct->als_enabled = 0;
 	ct->als_apers = 0x4;
