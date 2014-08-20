@@ -19,3 +19,21 @@
 / {
 	qcom,msm-id = <147 0x41 0x81d0>;
 };
+
+&soc {
+	usr_reset_warning {
+		compatible = "mmi,usr-reset-warning";
+		gpios = <&msmgpio 76 0x0>;
+	};
+};
+
+&spi_4 {
+	nmi326@0 {
+		/delete-property/ enable-active-high;
+	};
+};
+
+/* limit clock speed by 25MHz due to signal integrity issues in HS mode */
+&sdhc_2 {
+	qcom,clk-rates = <400000 25000000>;
+};

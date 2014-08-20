@@ -15,20 +15,27 @@
 /include/ "msm8974-camera-sensor-mtp.dtsi"
 /include/ "msm8974-camera-sensor-moto.dtsi"
 /include/ "msm8974-leds.dtsi"
+/include/ "dsi-panel-mot-dummy-qhd-video.dtsi"
+/include/ "carrier-channel-ids.dtsi"
 
 / {
+	memory {
+		reg = <0x00000000 0x00000000>,
+		      <0x00000000 0x00000000>;
+	};
+
 	aliases {
 		uart3 = &uart3;
 	};
 
 	cycapsense_prog {
 			compatible = "cypress,cycapsense_prog";
-			label = "cy8c20237_24lkxi";
-			silicon_id = <0x0142>;
+			label = "cy8c20247_24lkxi";
+			silicon_id = <0x0143>;
 			block_size = <128>;
-			num_of_blocks = <64>;
+			num_of_blocks = <128>;
 			secure_bytes = <16>;
-			gpios = <&msmgpio 73 0>, /* RESET */
+			gpios = <&msmgpio 63 0>, /* RESET */
 					<&msmgpio 111 0>, /* programming SCLK */
 					<&msmgpio 110 0>; /* programming SDAT */
 	};
@@ -216,6 +223,19 @@
 		qcom,msm-mi2s-rx-lines = <0>;
 		qcom,msm-mi2s-tx-lines = <1>;
 	};
+
+	cci: qcom,cci@fda0C000 {
+		gpios = <&msmgpio 21 0>,
+			<&msmgpio 22 0>;
+		qcom,gpio-tbl-num = <0 1>;
+		qcom,gpio-tbl-flags = <1 1>;
+		qcom,gpio-tbl-label = "CCI_I2C_DATA1",
+			"CCI_I2C_CLK1";
+	};
+
+	alsa_to_h2w {
+		compatible = "mmi,alsa-to-h2w";
+	};
 };
 
 &spmi_bus {
@@ -286,21 +306,28 @@
 			#size-cells = <1>;
 			status = "ok";
 
-			qcom,chg-vddmax-mv = <4200>;
-			qcom,chg-vddsafe-mv = <4200>;
-			qcom,chg-vinmin-mv = <4200>;
-			qcom,chg-ibatmax-ma = <1500>;
-			qcom,chg-ibatsafe-ma = <1500>;
-			qcom,chg-thermal-mitigation = <1500 700 600 325>;
-			qcom,chg-cool-bat-decidegc = <100>;
-			qcom,chg-cool-bat-mv = <4100>;
-			qcom,chg-ibatmax-warm-ma = <350>;
-			qcom,chg-warm-bat-decidegc = <450>;
-			qcom,chg-warm-bat-mv = <4100>;
-			qcom,chg-ibatmax-cool-ma = <350>;
-			qcom,chg-vbatdet-mv = <4100>;
+			qcom,vddmax-mv = <4200>;
+			qcom,vddsafe-mv = <4400>;
+			qcom,vinmin-mv = <4300>;
+			qcom,vbatdet-delta-mv = <150>;
+			qcom,ibatmax-ma = <2000>;
+			qcom,ibatterm-ma = <100>;
+			qcom,ibatsafe-ma = <3250>;
+			qcom,thermal-mitigation = <1500 700 600 325>;
+			qcom,resume-soc = <99>;
+			qcom,tchg-mins = <150>;
+			qcom,chg-vadc = <&pm8941_vadc>;
+			qcom,chg-adc_tm = <&pm8941_adc_tm>;
+			qcom,ibatmax-warm-ma = <2000>;
+			qcom,warm-bat-decidegc = <450>;
+			qcom,warm-bat-mv = <4000>;
+			qcom,cool-bat-decidegc = <10>;
+			qcom,cool-bat-mv = <4000>;
+			qcom,ibatmax-cool-ma = <2000>;
+			qcom,batt-hot-percentage = <25>;
+			qcom,batt-cold-percentage = <80>;
 
-			qcom,chg-chgr@1000 {
+			qcom,chgr@1000 {
 				status = "ok";
 				reg = <0x1000 0x100>;
 				interrupts =	<0x0 0x10 0x0>,
@@ -322,7 +349,7 @@
 							"chg-done";
 			};
 
-			qcom,chg-buck@1100 {
+			qcom,buck@1100 {
 				status = "ok";
 				reg = <0x1100 0x100>;
 				interrupts =	<0x0 0x11 0x0>,
@@ -342,7 +369,7 @@
 							"vdd-loop";
 			};
 
-			qcom,chg-bat-if@1200 {
+			qcom,bat-if@1200 {
 				status = "ok";
 				reg = <0x1200 0x100>;
 				interrupts =	<0x0 0x12 0x0>,
@@ -359,7 +386,7 @@
 
 			};
 
-			qcom,chg-usb-chgpth@1300 {
+			qcom,usb-chgpth@1300 {
 				status = "ok";
 				reg = <0x1300 0x100>;
 				interrupts =	<0 0x13 0x0>,
@@ -371,7 +398,7 @@
 							"chg-gone";
 			};
 
-			qcom,chg-dc-chgpth@1400 {
+			qcom,dc-chgpth@1400 {
 				status = "ok";
 				reg = <0x1400 0x100>;
 				interrupts =	<0x0 0x14 0x0>,
@@ -381,7 +408,7 @@
 							"dcin-valid";
 			};
 
-			qcom,chg-boost@1500 {
+			qcom,boost@1500 {
 				status = "ok";
 				reg = <0x1500 0x100>;
 				interrupts =	<0x0 0x15 0x0>,
@@ -391,7 +418,7 @@
 							"limit-error";
 			};
 
-			qcom,chg-misc@1600 {
+			qcom,misc@1600 {
 				status = "ok";
 				reg = <0x1600 0x100>;
 			};
@@ -504,6 +531,7 @@
 	qcom,min-fcc-learning-soc = <20>;
 	qcom,min-fcc-ocv-pc = <30>;
 	qcom,min-fcc-learning-samples = <5>;
+	qcom,use-external-rsense = <1>;
 	status = "ok";
 };
 
@@ -540,6 +568,10 @@
 	qcom,chg-misc@1600 {
 		status = "ok";
 	};
+};
+
+&pm8941_iadc {
+	qcom,rsense = <10000000>;
 };
 
 &pm8941_gpios {
@@ -588,6 +620,7 @@
 	gpio@c600 { /* GPIO 7 */
 		qcom,mode = <0>;        /* QPNP_PIN_MODE_DIG_IN */
 		qcom,pull = <0>;        /* QPNP_PIN_PULL_UP_30  */
+		qcom,vin-sel = <2>;     /* QPNP_PIN_VIN2  */
 		qcom,master-en = <1>;
 	};
 
@@ -628,7 +661,8 @@
 	gpio@cc00 { /* GPIO 13 */
 		qcom,mode = <1>;          /* QPNP_PIN_MODE_DIG_OUT */
 		qcom,out-strength = <1>;  /* QPNP_PIN_OUT_STRENGTH_LOW */
-		qcom,src-sel = <2>;       /* QPNP_PIN_SEL_FUNC_1  */
+		qcom,src-sel = <1>;       /* QPNP_PIN_SEL_FUNC_1  */
+		qcom,vin-sel = <2>;       /* QPNP_PIN_VIN2 */
 		qcom,master-en = <1>;
 	};
 
@@ -714,7 +748,8 @@
 	gpio@d800 { /* GPIO 25 */
 		qcom,mode = <1>;          /* QPNP_PIN_MODE_DIG_OUT */
 		qcom,out-strength = <1>;  /* QPNP_PIN_OUT_STRENGTH_LOW */
-		qcom,src-sel = <2>;       /* QPNP_PIN_SEL_FUNC_1  */
+		qcom,src-sel = <1>;       /* QPNP_PIN_SEL_FUNC_1  */
+		qcom,vin-sel = <2>;       /* QPNP_PIN_VIN2  */
 		qcom,master-en = <1>;
 	};
 
@@ -862,8 +897,8 @@
 	drv2605@5a {
 		compatible = "ti,drv2605";
 		reg = <0x5A>;
-		gpios = <&msmgpio 54 0>, /* EN_GPIO */
-			<&pm8941_gpios 2 0>; /* Trigger */
+		gpios = <&msmgpio 45 0>, /* EN_GPIO */
+			<&pm8941_mpps 2 0>; /* Trigger */
 		external_trigger = <1>;
 		default_effect = <17>;      /* Strong Click 100% */
 		rated_voltage = <0x70>;     /* 2.4v */
@@ -943,4 +978,16 @@
 
 &mdss_dsi1 {
 	status = "disabled";
+};
+
+&rpm_bus {
+	rpm-regulator-ldoa3 {
+		status = "okay";
+		pm8941_l3: regulator-l3 {
+			regulator-min-microvolt = <1050000>;
+			regulator-max-microvolt = <1225000>;
+			qcom,init-voltage = <1050000>;
+			status = "okay";
+		};
+	};
 };

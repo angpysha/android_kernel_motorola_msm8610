@@ -11,14 +11,21 @@
  */
 
 /dts-v1/;
-/include/ "msm8974-moto-reserve.dtsi"
-/include/ "msm8974pro-ab-abbagoochie-common.dtsi"
+/include/ "msm8974pro-ab-moto-common.dtsi"
+/include/ "msm8974pro-abbagoochie-common.dtsi"
 
 
 / {
 	qcom,msm-id = <218 0x41 0x8300>,
 		      <217 0x41 0x83b0>;
 };
+
+&i2c_1 {
+        stm401@39 {
+                sensor2-supply = <&pm8941_l17>;
+        };
+};
+
 
 &i2c_2 {
 	tfa9890@34 {
@@ -44,5 +51,32 @@
 		qcom,tfa9890-stereo;
 		qcom,tfa9890-left-name = "tfa9890.2-0034";
 		qcom,tfa9890-right-name = "tfa9890.2-0035";
+	};
+};
+
+&cci {
+
+	qcom,camera@6e {
+		cam_vana-supply = <&pm8941_l10>;
+		qcom,cam-vreg-name = "cam_vdig", "cam_vio", "cam_vana";
+		qcom,cam-vreg-type = <0 1 0>;
+		qcom,cam-vreg-min-voltage = <1225000 0 2850000>;
+		qcom,cam-vreg-max-voltage = <1225000 0 2850000>;
+		qcom,cam-vreg-op-mode = <105000 0 80000>;
+		qcom,cam-nondirect = <1>;  /* Abbagoochie p3 has to use Aptina dev board
+                                      for Front camera */
+		gpios = <&msmgpio 17 0>,
+			<&msmgpio 103 0>,
+			<&msmgpio 96 0>,
+			<&msmgpio 104 0>;
+		qcom,gpio-reset = <1>;
+		qcom,gpio-vana = <2>;
+		qcom,gpio-vdig = <3>;
+		qcom,gpio-req-tbl-num = <0 1 2 3>;
+		qcom,gpio-req-tbl-flags = <1 0 0 0>;
+		qcom,gpio-req-tbl-label = "CAMIF_MCLK",
+					  "CAM_RESET",
+					  "CAM_AVDD",
+					  "CAM_VDIG";
 	};
 };

@@ -27,6 +27,15 @@
 &soc {
 	/delete-node/ fan5646_vreg;
 	/delete-node/ fan5646;
+
+	sound {
+		/delete-property/ qcom,ext-spk-amp-gpio;
+		/delete-property/ boost-supply;
+	};
+
+	usb@f9a55000 {
+		otg,id_gnd_gpio = <&msmgpio 76 0x0>;
+	};
 };
 
 &i2c {
@@ -48,6 +57,11 @@
 &i2c_3 {
 	lm2755@18 {
 		status = "ok";
+	};
+
+	tpa6165xx@40 {
+		hs_det_vdd-supply = <&pm8110_l6>;
+		hs_det_micvdd-supply = <&pm8110_l22>;
 	};
 };
 

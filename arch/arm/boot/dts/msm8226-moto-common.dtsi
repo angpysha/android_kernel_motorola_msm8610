@@ -12,7 +12,7 @@
  */
 
 /include/ "msm8226-moto-gpiomux.dtsi"
-/include/ "msm8226-camera-sensor-falcon.dtsi"
+/include/ "carrier-channel-ids.dtsi"
 
 / {
 	memory {
@@ -27,6 +27,11 @@
 
 &mdss_dsi0 {
 	qcom,dsi-pref-prim-pan = <&mot_cmi_720p_vid_v2>;
+};
+
+&apc_vreg_corner {
+	qcom,cpr-voltage-ceiling = <1140000 1150000 1280000>;
+	qcom,cpr-voltage-floor = <1140000 1140000 1140000>;
 };
 
 &soc {
@@ -82,6 +87,17 @@
 			interrupts = <17 0x0>;
 			vdd-supply = <&pm8226_l19>;
 			vcc_i2c-supply = <&pm8226_lvs1>;
+		};
+
+		aps_ts@34 {
+			compatible = "melfas-aps,aps_ts";
+			reg = <0x34>;
+			interrupt-parent = <&msmgpio>;
+			interrupts = <17 0>;
+			gpios = <&msmgpio 17 0>, /* IRQ */
+				<&msmgpio 16 0>; /* RESET */
+			aps_ts,default-product-id = "Falc";
+			aps_ts,high-speed-isp;
 		};
 	};
 
@@ -328,6 +344,12 @@
 				qcom,ovp-val = <2>;
 				qcom,num-strings = <1>;
 				qcom,id = <0>;
+				mmi,panels {
+					panel@0 {
+						panel_name = "mipi_mot_video_cmi_hd_450";
+						version = <0x85>;
+					};
+				};
 			};
 		};
 	};
