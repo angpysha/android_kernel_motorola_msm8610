@@ -689,46 +689,6 @@ out:
 	return err;
 }
 
-static int mmc_sd_throttle_back(struct mmc_host *host)
-{
-	struct sd_switch_caps *sw_caps = &host->card->sw_caps;
-	char *speed = NULL;
-
-	mmc_claim_host(host);
-
-	if (mmc_sd_card_uhs(host->card)) {
-		if (sw_caps->sd3_bus_mode & SD_MODE_UHS_SDR104) {
-			sw_caps->sd3_bus_mode &= ~SD_MODE_UHS_SDR104;
-			speed = "DDR50";
-		} else if (sw_caps->sd3_bus_mode & SD_MODE_UHS_DDR50) {
-			/* Skip SDR50 if DDR50 fails. */
-			sw_caps->sd3_bus_mode &= ~(SD_MODE_UHS_DDR50 |
-						   SD_MODE_UHS_SDR50);
-			speed = "SDR25";
-		} else if (sw_caps->sd3_bus_mode & SD_MODE_UHS_SDR25) {
-			sw_caps->sd3_bus_mode &= ~SD_MODE_UHS_SDR25;
-			speed = "SDR12";
-		}
-	} else if (sw_caps->hs_max_dtr > 0) {
-		/* Disable high speed for legacy cards */
-		sw_caps->hs_max_dtr = 0;
-		speed = "legacy";
-	}
-
-	mmc_release_host(host);
-
-	if (speed)
-		pr_warning("%s: throttle back to %s\n",
-				mmc_hostname(host), speed);
-	else {
-		pr_err("%s: unable to throttle back further\n",
-				mmc_hostname(host));
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
 /*
  * UHS-I specific initialization procedure
  */
@@ -853,7 +813,6 @@ int mmc_sd_get_cid(struct mmc_host *host, u32 ocr, u32 *cid, u32 *rocr)
 	 * state.  We wait 1ms to give cards time to
 	 * respond.
 	 */
-try_again:
 	mmc_go_idle(host);
 
 	/*
@@ -879,6 +838,7 @@ try_again:
 	    MMC_CAP_SET_XPC_180))
 		ocr |= SD_OCR_XPC;
 
+try_again:
 	err = mmc_send_app_op_cond(host, ocr, rocr);
 	if (err)
 		return err;
@@ -1172,11 +1132,11 @@ static void mmc_sd_remove(struct mmc_host *host)
 	BUG_ON(!host);
 	BUG_ON(!host->card);
 
+	mmc_exit_clk_scaling(host);
 	mmc_remove_card(host->card);
 
 	mmc_claim_host(host);
 	host->card = NULL;
-	mmc_exit_clk_scaling(host);
 	mmc_release_host(host);
 }
 
@@ -1278,7 +1238,6 @@ static int mmc_sd_resume(struct mmc_host *host)
 	int err;
 #ifdef CONFIG_MMC_PARANOID_SD_INIT
 	int retries;
-	unsigned long delay = 5000, settle = 0;
 #endif
 
 	BUG_ON(!host);
@@ -1291,19 +1250,13 @@ static int mmc_sd_resume(struct mmc_host *host)
 		err = mmc_sd_init_card(host, host->ocr, host->card);
 
 		if (err) {
-			printk(KERN_ERR "%s: Re-init card rc = %d "
-				"(retries = %d, delay = %lu)\n",
-				mmc_hostname(host), err, retries, delay);
+			printk(KERN_ERR "%s: Re-init card rc = %d (retries = %d)\n",
+			       mmc_hostname(host), err, retries);
 			retries--;
 			mmc_power_off(host);
-			usleep_range(delay, delay + 500);
+			usleep_range(5000, 5500);
 			mmc_power_up(host);
 			mmc_select_voltage(host, host->ocr);
-			if (settle)
-				usleep_range(settle, settle + 500);
-			/* Increase settle times on each attempt */
-			delay += 10000;
-			settle += 10000;
 			continue;
 		}
 		break;
@@ -1349,7 +1302,6 @@ static const struct mmc_bus_ops mmc_sd_ops = {
 	.power_restore = mmc_sd_power_restore,
 	.alive = mmc_sd_alive,
 	.change_bus_speed = mmc_sd_change_bus_speed,
-	.throttle_back = mmc_sd_throttle_back,
 };
 
 static const struct mmc_bus_ops mmc_sd_ops_unsafe = {
@@ -1360,7 +1312,6 @@ static const struct mmc_bus_ops mmc_sd_ops_unsafe = {
 	.power_restore = mmc_sd_power_restore,
 	.alive = mmc_sd_alive,
 	.change_bus_speed = mmc_sd_change_bus_speed,
-	.throttle_back = mmc_sd_throttle_back,
 };
 
 static void mmc_sd_attach_bus_ops(struct mmc_host *host)
@@ -1383,7 +1334,6 @@ int mmc_attach_sd(struct mmc_host *host)
 	u32 ocr;
 #ifdef CONFIG_MMC_PARANOID_SD_INIT
 	int retries;
-	unsigned long delay = 5000, settle = 0;
 #endif
 
 	BUG_ON(!host);
@@ -1454,14 +1404,9 @@ int mmc_attach_sd(struct mmc_host *host)
 		if (err) {
 			retries--;
 			mmc_power_off(host);
-			usleep_range(delay, delay + 500);
+			usleep_range(5000, 5500);
 			mmc_power_up(host);
 			mmc_select_voltage(host, host->ocr);
-			if (settle)
-				usleep_range(settle, settle + 500);
-			/* Increase settle times on each attempt */
-			delay += 10000;
-			settle += 10000;
 			continue;
 		}
 		break;
